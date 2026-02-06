@@ -895,5 +895,168 @@ size_t _z_send_udp_multicast(const _z_sys_net_socket_t sock, const uint8_t *ptr,
 #endif
 
 #if Z_FEATURE_LINK_SERIAL == 1
-#error "Serial not supported yet on Unix port of Zenoh-Pico"
-#endif
+#include <termios.h>
+
+#include "zenoh-pico/system/link/serial.h"
+#include "zenoh-pico/protocol/codec/serial.h"
+#include "zenoh-pico/utils/checksum.h"
+#include "zenoh-pico/utils/encoding.h"
+
+/*------------------ Serial sockets ------------------*/
+
+static speed_t _get_baudrate(uint32_t baudrate) {
+    switch (baudrate) {
+        case 9600: return B9600;
+        case 19200: return B19200;
+        case 38400: return B38400;
+        case 57600: return B57600;
+        case 115200: return B115200;
+        case 230400: return B230400;
+        case 460800: return B460800;
+        case 921600: return B921600;
+        default: return B115200;
+    }
+}
+
+z_result_t _z_open_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint32_t baudrate) {
+    z_result_t ret = _Z_RES_OK;
+
+    sock->_fd = open(dev, O_RDWR | O_NOCTTY);
+    if (sock->_fd < 0) {
+        _Z_ERROR_LOG(_Z_ERR_GENERIC);
+        return _Z_ERR_GENERIC;
+    }
+
+    struct termios tty;
+    (void)memset(&tty, 0, sizeof(tty));
+    if (tcgetattr(sock->_fd, &tty) != 0) {
+        close(sock->_fd);
+        sock->_fd = -1;
+        _Z_ERROR_LOG(_Z_ERR_GENERIC);
+        return _Z_ERR_GENERIC;
+    }
+
+    cfmakeraw(&tty);
+    speed_t speed = _get_baudrate(baudrate);
+    cfsetispeed(&tty, speed);
+    cfsetospeed(&tty, speed);
+
+    // 8N1, no flow control (matches Zenoh Rust defaults)
+    tty.c_cflag &= ~(tcflag_t)(CSTOPB | CRTSCTS);
+    tty.c_cflag |= (tcflag_t)(CLOCAL | CREAD);
+
+    // Blocking read with per-byte timeout
+    tty.c_cc[VMIN] = 1;
+    tty.c_cc[VTIME] = 10;  // 1 second timeout (in deciseconds)
+
+    if (tcsetattr(sock->_fd, TCSANOW, &tty) != 0) {
+        close(sock->_fd);
+        sock->_fd = -1;
+        _Z_ERROR_LOG(_Z_ERR_GENERIC);
+        return _Z_ERR_GENERIC;
+    }
+
+    // Flush any stale data
+    tcflush(sock->_fd, TCIOFLUSH);
+
+    return (ret == _Z_RES_OK ? _z_connect_serial(*sock) : ret);
+}
+
+z_result_t _z_open_serial_from_pins(_z_sys_net_socket_t *sock, uint32_t txpin, uint32_t rxpin, uint32_t baudrate) {
+    (void)(sock);
+    (void)(txpin);
+    (void)(rxpin);
+    (void)(baudrate);
+
+    // Pin-based serial not applicable on Unix
+    _Z_ERROR_LOG(_Z_ERR_GENERIC);
+    return _Z_ERR_GENERIC;
+}
+
+z_result_t _z_listen_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint32_t baudrate) {
+    // Serial is symmetric — listen is same as open
+    return _z_open_serial_from_dev(sock, dev, baudrate);
+}
+
+z_result_t _z_listen_serial_from_pins(_z_sys_net_socket_t *sock, uint32_t txpin, uint32_t rxpin, uint32_t baudrate) {
+    (void)(sock);
+    (void)(txpin);
+    (void)(rxpin);
+    (void)(baudrate);
+
+    // Pin-based serial not applicable on Unix
+    _Z_ERROR_LOG(_Z_ERR_GENERIC);
+    return _Z_ERR_GENERIC;
+}
+
+void _z_close_serial(_z_sys_net_socket_t *sock) {
+    if (sock->_fd >= 0) {
+        close(sock->_fd);
+        sock->_fd = -1;
+    }
+}
+
+size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len) {
+    uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
+    if (raw_buf == NULL) {
+        _Z_ERROR("Failed to allocate serial COBS buffer");
+        return SIZE_MAX;
+    }
+    size_t rb = 0;
+    for (size_t i = 0; i < _Z_SERIAL_MAX_COBS_BUF_SIZE; i++) {
+        ssize_t n = read(sock._fd, &raw_buf[i], 1);
+        if (n <= 0) {
+            z_free(raw_buf);
+            return SIZE_MAX;
+        }
+
+        rb++;
+        if (raw_buf[i] == (uint8_t)0x00) {  // End-of-packet marker
+            break;
+        }
+    }
+
+    uint8_t *tmp_buf = (uint8_t *)z_malloc(_Z_SERIAL_MFS_SIZE);
+    if (tmp_buf == NULL) {
+        _Z_ERROR("Failed to allocate serial MFS buffer");
+        z_free(raw_buf);
+        return SIZE_MAX;
+    }
+    size_t ret = _z_serial_msg_deserialize(raw_buf, rb, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
+
+    z_free(raw_buf);
+    z_free(tmp_buf);
+
+    return ret;
+}
+
+size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, const uint8_t *ptr, size_t len) {
+    uint8_t *tmp_buf = (uint8_t *)z_malloc(_Z_SERIAL_MFS_SIZE);
+    uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
+    if ((raw_buf == NULL) || (tmp_buf == NULL)) {
+        _Z_ERROR("Failed to allocate serial COBS and/or MFS buffer");
+        z_free(tmp_buf);
+        z_free(raw_buf);
+        return SIZE_MAX;
+    }
+    size_t ret =
+        _z_serial_msg_serialize(raw_buf, _Z_SERIAL_MAX_COBS_BUF_SIZE, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
+
+    if (ret == SIZE_MAX) {
+        z_free(raw_buf);
+        z_free(tmp_buf);
+        return ret;
+    }
+
+    ssize_t wb = write(sock._fd, raw_buf, ret);
+
+    z_free(raw_buf);
+    z_free(tmp_buf);
+
+    if (wb < 0 || (size_t)wb != ret) {
+        return SIZE_MAX;
+    }
+
+    return len;
+}
+#endif  // Z_FEATURE_LINK_SERIAL == 1
