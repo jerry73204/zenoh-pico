@@ -24,6 +24,9 @@
 #if defined(ZENOH_LINUX)
 #include <sys/random.h>
 #include <sys/time.h>
+#elif defined(ZENOH_NUTTX)
+#include <sys/time.h>
+#include <fcntl.h>
 #endif
 
 #include <unistd.h>
@@ -41,6 +44,8 @@ uint8_t z_random_u8(void) {
     }
 #elif defined(ZENOH_MACOS) || defined(ZENOH_BSD)
     ret = z_random_u32();
+#elif defined(ZENOH_NUTTX)
+    z_random_fill(&ret, sizeof(ret));
 #endif
 
     return ret;
@@ -54,6 +59,8 @@ uint16_t z_random_u16(void) {
     }
 #elif defined(ZENOH_MACOS) || defined(ZENOH_BSD)
     ret = z_random_u32();
+#elif defined(ZENOH_NUTTX)
+    z_random_fill(&ret, sizeof(ret));
 #endif
 
     return ret;
@@ -67,6 +74,8 @@ uint32_t z_random_u32(void) {
     }
 #elif defined(ZENOH_MACOS) || defined(ZENOH_BSD)
     ret = arc4random();
+#elif defined(ZENOH_NUTTX)
+    z_random_fill(&ret, sizeof(ret));
 #endif
 
     return ret;
@@ -82,6 +91,8 @@ uint64_t z_random_u64(void) {
     ret |= z_random_u32();
     ret = ret << 32;
     ret |= z_random_u32();
+#elif defined(ZENOH_NUTTX)
+    z_random_fill(&ret, sizeof(ret));
 #endif
 
     return ret;
@@ -94,6 +105,17 @@ void z_random_fill(void *buf, size_t len) {
     }
 #elif defined(ZENOH_MACOS) || defined(ZENOH_BSD)
     arc4random_buf(buf, len);
+#elif defined(ZENOH_NUTTX)
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        size_t total = 0;
+        while (total < len) {
+            ssize_t n = read(fd, (uint8_t *)buf + total, len - total);
+            if (n <= 0) break;
+            total += (size_t)n;
+        }
+        close(fd);
+    }
 #endif
 }
 
