@@ -25,7 +25,7 @@
 #include "zenoh-pico/config.h"
 #include "zenoh-pico/utils/result.h"
 
-#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_NUTTX)
 #include "zenoh-pico/system/platform/unix.h"
 #elif defined(ZENOH_WINDOWS)
 #define NOMINMAX

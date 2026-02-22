@@ -16,7 +16,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(ZENOH_NUTTX)
 #include <ifaddrs.h>
+#endif
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -414,7 +416,7 @@ size_t _z_read_exact_tcp(const _z_sys_net_socket_t sock, uint8_t *ptr, size_t le
 }
 
 size_t _z_send_tcp(const _z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_LINUX) || defined(ZENOH_NUTTX)
     return (size_t)send(sock._fd, ptr, len, MSG_NOSIGNAL);
 #else
     return send(sock._fd, ptr, len, 0);
@@ -530,6 +532,27 @@ size_t _z_send_udp_unicast(const _z_sys_net_socket_t sock, const uint8_t *ptr, s
 unsigned int __get_ip_from_iface(const char *iface, int sa_family, struct sockaddr **lsockaddr) {
     unsigned int addrlen = 0U;
 
+#if defined(ZENOH_NUTTX)
+    // NuttX may not provide getifaddrs(). For multicast, bind to INADDR_ANY.
+    _ZP_UNUSED(iface);
+    if (sa_family == AF_INET) {
+        *lsockaddr = (struct sockaddr *)z_malloc(sizeof(struct sockaddr_in));
+        if (*lsockaddr != NULL) {
+            (void)memset(*lsockaddr, 0, sizeof(struct sockaddr_in));
+            ((struct sockaddr_in *)*lsockaddr)->sin_family = AF_INET;
+            ((struct sockaddr_in *)*lsockaddr)->sin_addr.s_addr = htonl(INADDR_ANY);
+            addrlen = sizeof(struct sockaddr_in);
+        }
+    } else if (sa_family == AF_INET6) {
+        *lsockaddr = (struct sockaddr *)z_malloc(sizeof(struct sockaddr_in6));
+        if (*lsockaddr != NULL) {
+            (void)memset(*lsockaddr, 0, sizeof(struct sockaddr_in6));
+            ((struct sockaddr_in6 *)*lsockaddr)->sin6_family = AF_INET6;
+            ((struct sockaddr_in6 *)*lsockaddr)->sin6_addr = in6addr_any;
+            addrlen = sizeof(struct sockaddr_in6);
+        }
+    }
+#else
     struct ifaddrs *l_ifaddr = NULL;
     if (getifaddrs(&l_ifaddr) != -1) {
         struct ifaddrs *tmp = NULL;
@@ -560,6 +583,7 @@ unsigned int __get_ip_from_iface(const char *iface, int sa_family, struct sockad
         }
         freeifaddrs(l_ifaddr);
     }
+#endif
 
     return addrlen;
 }
@@ -800,7 +824,7 @@ void _z_close_udp_multicast(_z_sys_net_socket_t *sockrecv, _z_sys_net_socket_t *
             // Required to be compliant with MISRA 15.7 rule
         }
     }
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_LINUX) || defined(ZENOH_NUTTX)
     if (lep._iptcp != NULL) {
         z_free(lep._iptcp->ai_addr);
     }
