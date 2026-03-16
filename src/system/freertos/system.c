@@ -17,6 +17,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 
 #if defined(ZENOH_FREERTOS_PLUS_TCP)
@@ -71,10 +72,25 @@ void *z_malloc(size_t size) {
 }
 
 void *z_realloc(void *ptr, size_t size) {
-    _ZP_UNUSED(ptr);
-    _ZP_UNUSED(size);
-    // realloc not implemented in FreeRTOS
-    return NULL;
+    /* FreeRTOS heap doesn't support realloc natively.
+     * Allocate new, copy, free old — same approach as ThreadX. */
+    if (ptr == NULL) {
+        return z_malloc(size);
+    }
+    if (size == 0) {
+        vPortFree(ptr);
+        return NULL;
+    }
+    void *new_ptr = pvPortMalloc(size);
+    if (new_ptr == NULL) {
+        return NULL;
+    }
+    /* FreeRTOS pvPortMalloc doesn't expose the old block size.
+     * Copy `size` bytes — safe because realloc callers pass
+     * new_size >= old_size (growing) or accept truncation (shrinking). */
+    memcpy(new_ptr, ptr, size);
+    vPortFree(ptr);
+    return new_ptr;
 }
 
 void z_free(void *ptr) { vPortFree(ptr); }
