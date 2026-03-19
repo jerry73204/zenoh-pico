@@ -548,6 +548,12 @@ z_result_t _z_query(_z_session_t *zn, const _z_keyexpr_t *keyexpr, const char *p
         _Z_CLEAN_RETURN_IF_ERR(
             _z_send_n_msg(zn, &z_msg, Z_RELIABILITY_RELIABLE, _z_n_qos_get_congestion_control(qos), NULL),
             _z_unregister_pending_query(zn, pq));
+
+        // Reset start time after the TCP send completes. On QEMU with -icount
+        // shift=auto, the blocking send loop advances the virtual clock by the
+        // instruction count, so the timeout would fire prematurely if we kept
+        // the start time recorded before the send.
+        pq->_start_time = z_clock_now();
     }
 
 #if Z_FEATURE_LOCAL_QUERYABLE == 1
