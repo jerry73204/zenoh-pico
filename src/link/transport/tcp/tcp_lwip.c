@@ -71,6 +71,19 @@ static z_result_t _z_tcp_lwip_open(_z_sys_net_socket_t *sock, const _z_sys_net_e
             ret = _Z_ERR_GENERIC;
         }
 
+        // Set send timeout to match recv timeout.
+        // Without SO_SNDTIMEO, lwip_send blocks indefinitely when the TCP
+        // congestion window closes (tcp_write returns ERR_MEM). On FreeRTOS
+        // QEMU with -icount shift=auto, the TCP ACK round-trip through slirp
+        // takes wall-clock time, which can cause the send buffer to fill before
+        // ACKs arrive. With a timeout, the send fails with ERR_WOULDBLOCK
+        // instead of blocking forever, allowing the caller to retry.
+        if ((ret == _Z_RES_OK) &&
+            (setsockopt(_z_lwip_socket_get(*sock), SOL_SOCKET, SO_SNDTIMEO, (char *)&tv, sizeof(tv)) < 0)) {
+            _Z_ERROR_LOG(_Z_ERR_GENERIC);
+            ret = _Z_ERR_GENERIC;
+        }
+
         int flags = 1;
         if ((ret == _Z_RES_OK) &&
             (setsockopt(_z_lwip_socket_get(*sock), SOL_SOCKET, SO_KEEPALIVE, (void *)&flags, sizeof(flags)) < 0)) {
