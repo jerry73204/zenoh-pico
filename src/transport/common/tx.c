@@ -283,6 +283,19 @@ z_result_t _z_transport_tx_send_t_msg_wrapper(_z_transport_common_t *ztc, const 
     return _z_transport_tx_send_t_msg(ztc, t_msg, NULL);
 }
 
+z_result_t _z_transport_tx_try_send_t_msg(_z_transport_common_t *ztc, const _z_transport_message_t *t_msg,
+                                           _z_transport_peer_unicast_slist_t *peers) {
+    // Non-blocking variant: skip the send if the TX mutex is busy.
+    // Used by the lease task for keep-alive sends to avoid contending
+    // with the app task's entity declarations on _mutex_tx.
+    if (_z_transport_tx_mutex_lock(ztc, false) != _Z_RES_OK) {
+        return _Z_RES_OK;  // TX busy — caller should retry later
+    }
+    z_result_t ret = _z_transport_tx_send_t_msg_inner(ztc, t_msg, peers);
+    _z_transport_tx_mutex_unlock(ztc);
+    return ret;
+}
+
 static z_result_t _z_transport_tx_send_n_msg(_z_transport_common_t *ztc, const _z_network_message_t *n_msg,
                                              z_reliability_t reliability, z_congestion_control_t cong_ctrl,
                                              _z_transport_peer_unicast_slist_t *peers) {

@@ -66,8 +66,17 @@ static void _zp_unicast_report_disconnected_peers(_z_transport_unicast_t *ztu,
 z_result_t _zp_unicast_send_keep_alive(_z_transport_unicast_t *ztu) {
     z_result_t ret = _Z_RES_OK;
 
+    // Use non-blocking try-lock for keep-alive sends.
+    //
+    // The TX mutex may be held by the app task during entity declarations
+    // (z_declare_queryable, z_declare_publisher). Each declaration's TCP
+    // send holds _mutex_tx for a full network round-trip. Blocking here
+    // would stall the executor until all declarations complete.
+    //
+    // Using try_send: if the TX path is busy, skip this keep-alive.
+    // The declaration sends themselves prove liveness to the router.
     _z_transport_message_t t_msg = _z_t_msg_make_keep_alive();
-    ret = _z_transport_tx_send_t_msg(&ztu->_common, &t_msg, NULL);
+    ret = _z_transport_tx_try_send_t_msg(&ztu->_common, &t_msg, NULL);
 
     return ret;
 }
@@ -199,7 +208,7 @@ _z_fut_fn_result_t _zp_unicast_keep_alive_task_fn(void *ztu_arg, _z_executor_t *
             _z_transport_message_t t_msg = _z_t_msg_make_keep_alive();
             _z_transport_peer_mutex_lock(&ztu->_common);
             if (!_z_transport_peer_unicast_slist_is_empty(ztu->_peers)) {
-                if (_z_transport_tx_send_t_msg(&ztu->_common, &t_msg, ztu->_peers) != _Z_RES_OK) {
+                if (_z_transport_tx_try_send_t_msg(&ztu->_common, &t_msg, ztu->_peers) != _Z_RES_OK) {
                     _Z_INFO("Send keep alive failed.");
                     // TODO: report failed peers and close them ?
                 }
