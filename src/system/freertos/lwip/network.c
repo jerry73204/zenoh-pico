@@ -159,6 +159,9 @@ void _z_free_endpoint_tcp(_z_sys_net_endpoint_t *ep) { freeaddrinfo(ep->_iptcp);
 z_result_t _z_open_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t rep, uint32_t tout) {
     z_result_t ret = _Z_RES_OK;
 
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
     sock->_socket = socket(rep._iptcp->ai_family, rep._iptcp->ai_socktype, rep._iptcp->ai_protocol);
     if (sock->_socket != -1) {
         z_time_t tv;
@@ -287,6 +290,9 @@ void _z_close_tcp(_z_sys_net_socket_t *sock) {
 }
 
 size_t _z_read_tcp(const _z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
     ssize_t rb = recv(sock._socket, ptr, len, 0);
     if (rb < (ssize_t)0) {
         return SIZE_MAX;
@@ -314,6 +320,9 @@ size_t _z_read_exact_tcp(const _z_sys_net_socket_t sock, uint8_t *ptr, size_t le
 }
 
 size_t _z_send_tcp(const _z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
     return send(sock._socket, ptr, len, 0);
 }
 #else
