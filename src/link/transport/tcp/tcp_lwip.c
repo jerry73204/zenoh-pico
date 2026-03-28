@@ -59,6 +59,9 @@ static void _z_tcp_lwip_endpoint_clear(_z_sys_net_endpoint_t *ep) {
 static z_result_t _z_tcp_lwip_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout) {
     z_result_t ret = _Z_RES_OK;
 
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
     _z_lwip_socket_set(sock,
                        socket(endpoint._iptcp->ai_family, endpoint._iptcp->ai_socktype, endpoint._iptcp->ai_protocol));
     if (_z_lwip_socket_get(*sock) != -1) {
@@ -236,6 +239,9 @@ static void _z_tcp_lwip_close(_z_sys_net_socket_t *sock) {
 }
 
 static size_t _z_tcp_lwip_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
     ssize_t rb = recv(_z_lwip_socket_get(sock), ptr, len, 0);
     if (rb < (ssize_t)0) {
         return SIZE_MAX;
@@ -263,6 +269,9 @@ static size_t _z_tcp_lwip_read_exact(_z_sys_net_socket_t sock, uint8_t *ptr, siz
 }
 
 static size_t _z_tcp_lwip_write(_z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
     return (size_t)send(_z_lwip_socket_get(sock), ptr, len, 0);
 }
 
