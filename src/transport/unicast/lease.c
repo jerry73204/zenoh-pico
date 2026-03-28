@@ -27,12 +27,19 @@
 #if Z_FEATURE_UNICAST_TRANSPORT == 1
 
 z_result_t _zp_unicast_send_keep_alive(_z_transport_unicast_t *ztu) {
-    z_result_t ret = _Z_RES_OK;
-
+    // Use non-blocking try-lock for keep-alive sends.
+    //
+    // The TX mutex may be held by the app task during entity declarations
+    // (z_declare_queryable, z_declare_publisher). Each declaration's TCP
+    // send holds _mutex_tx for a full network round-trip. On FreeRTOS QEMU
+    // with -icount shift=auto (wall-clock virtual time), blocking here would
+    // stall the lease task until all declarations complete, potentially
+    // causing cascading delays that starve the declaration sends.
+    //
+    // Using try_send: if the TX path is busy, skip this keep-alive.
+    // The declaration sends themselves prove liveness to the router.
     _z_transport_message_t t_msg = _z_t_msg_make_keep_alive();
-    ret = _z_transport_tx_send_t_msg(&ztu->_common, &t_msg, NULL);
-
-    return ret;
+    return _z_transport_tx_try_send_t_msg(&ztu->_common, &t_msg, NULL);
 }
 #else
 
@@ -195,11 +202,11 @@ void *_zp_unicast_lease_task(void *ztu_arg) {
             if (next_keep_alive <= 0) {
                 if (!ztu->_common._transmitted) {
                     _Z_DEBUG("Sending keep alive");
-                    // Send keep alive to all peers
+                    // Send keep alive to all peers (non-blocking — skip if TX busy)
                     _z_transport_message_t t_msg = _z_t_msg_make_keep_alive();
                     _z_transport_peer_mutex_lock(&ztu->_common);
                     if (!_z_transport_peer_unicast_slist_is_empty(ztu->_peers)) {
-                        if (_z_transport_tx_send_t_msg(&ztu->_common, &t_msg, ztu->_peers) != _Z_RES_OK) {
+                        if (_z_transport_tx_try_send_t_msg(&ztu->_common, &t_msg, ztu->_peers) != _Z_RES_OK) {
                             _Z_INFO("Send keep alive failed.");
                         }
                     }
