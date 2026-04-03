@@ -244,13 +244,16 @@ z_result_t _z_open_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t re
             _Z_ERROR_LOG(_Z_ERR_GENERIC);
             ret = _Z_ERR_GENERIC;
         }
-#if Z_FEATURE_TCP_NODELAY == 1
+#if Z_FEATURE_TCP_NODELAY == 1 && !defined(ZENOH_NUTTX)
+        // NuttX: TCP_NODELAY=16 but cross-compilation picks up host's TCP_NODELAY=1
         if ((ret == _Z_RES_OK) &&
             (setsockopt(sock->_fd, IPPROTO_TCP, TCP_NODELAY, (void *)&flags, sizeof(flags)) < 0)) {
             _Z_ERROR_LOG(_Z_ERR_GENERIC);
             ret = _Z_ERR_GENERIC;
         }
 #endif
+#ifndef ZENOH_NUTTX
+        // NuttX: SO_LINGER requires CONFIG_NET_SOLINGER which is typically not enabled
         struct linger ling;
         ling.l_onoff = 1;
         ling.l_linger = Z_TRANSPORT_LEASE / 1000;
@@ -259,6 +262,7 @@ z_result_t _z_open_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t re
             _Z_ERROR_LOG(_Z_ERR_GENERIC);
             ret = _Z_ERR_GENERIC;
         }
+#endif
 
 #if defined(ZENOH_MACOS) || defined(ZENOH_BSD)
         int nosigpipe_val = 1;
