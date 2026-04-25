@@ -90,7 +90,24 @@ _z_pending_query_t *_z_unsafe_get_pending_query_by_id(_z_session_t *zn, const _z
  */
 _z_pending_query_t *_z_unsafe_register_pending_query(_z_session_t *zn) {
     _z_zint_t qid = zn->_query_id++;
+    // Push a fresh empty entry for this query. Allocation failure must be
+    // reported back to the caller: `_z_pending_query_slist_push_empty` returns
+    // the UNCHANGED head on OOM (collections/list.c::_z_slist_push_empty ends
+    // `if (new_node == NULL) { return node; }`), so a failed push is
+    // indistinguishable from a successful one by the return value alone.
+    // Detect it by comparing the head pointer across the call.
+    //
+    // Without this check the line below takes `_z_pending_query_slist_value`
+    // of the PREVIOUS query's node and overwrites its `_id` with this query's
+    // -- silently corrupting another in-flight query -- and the caller's
+    // `if (pq == NULL)` can never fire, because a non-NULL previous head is
+    // returned on the failing path.
+    _z_pending_query_slist_t *prev_head = zn->_pending_queries;
     zn->_pending_queries = _z_pending_query_slist_push_empty(zn->_pending_queries);
+    if (zn->_pending_queries == prev_head) {
+        _Z_ERROR_LOG(_Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        return NULL;
+    }
     _z_pending_query_t *pq = _z_pending_query_slist_value(zn->_pending_queries);
     pq->_id = qid;
     return pq;
