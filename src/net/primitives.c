@@ -517,9 +517,10 @@ z_result_t _z_query(_z_session_t *zn, const _z_keyexpr_t *keyexpr, const char *p
     _z_session_mutex_lock(zn);
     _z_zint_t qid = _z_unsafe_get_query_id(zn);
     _Z_CLEAN_RETURN_IF_ERR(_z_unsafe_register_pending_query(zn, qid), _z_session_mutex_unlock(zn));
-    // Create the pending query object
+    // The fresh entry is at the head of `_pending_queries` and already
+    // has `_id == qid` (set by `_z_unsafe_register_pending_query`).
+    // Fill in the remaining fields under the same mutex.
     _z_pending_query_t *pq = _z_pending_query_slist_value(zn->_pending_queries);
-    pq->_id = qid;
     pq->_key = ke_query;
     pq->_target = target;
     pq->_consolidation = consolidation;

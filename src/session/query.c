@@ -104,17 +104,35 @@ _z_pending_query_t *_z_get_pending_query_by_id(_z_session_t *zn, const _z_zint_t
 }
 
 z_result_t _z_unsafe_register_pending_query(_z_session_t *zn, _z_zint_t id) {
-    z_result_t ret = _Z_RES_OK;
-
-    _z_pending_query_t *pql = __unsafe__z_get_pending_query_by_id(zn, id);
-    if (pql == NULL) {  // Register query only if a pending one with the same ID does not exist
-        zn->_pending_queries = _z_pending_query_slist_push_empty(zn->_pending_queries);
-    } else {
-        _Z_ERROR_LOG(_Z_ERR_ENTITY_DECLARATION_FAILED);
-        ret = _Z_ERR_ENTITY_DECLARATION_FAILED;
+    // Push a fresh empty entry for this query. Allocation failure must
+    // be reported back to the caller — `_z_pending_query_slist_push_empty`
+    // returns the unchanged head on OOM (see collections/list.c::
+    // _z_slist_push_empty), so detect that by comparing the head
+    // pointer before and after. Without this check, the caller would
+    // dereference `_z_pending_query_slist_value(zn->_pending_queries)`
+    // and read the *previous* query's storage, then overwrite its
+    // fields with the new query's data — silent corruption of the
+    // other in-flight query.
+    //
+    // Race 1's mutex widening (the caller now holds `_mutex_inner`
+    // for both `_z_unsafe_get_query_id` and this registration) makes
+    // id collisions impossible by construction: ids are monotonic
+    // and the mutex serialises every increment with every read of
+    // `_pending_queries`. The previous defensive walk for a duplicate
+    // id was therefore dead code and is removed.
+    //
+    // The fresh entry's `_id` is initialised here so the function
+    // matches its name — the caller no longer has to remember to
+    // set it separately.
+    _z_pending_query_slist_t *prev_head = zn->_pending_queries;
+    zn->_pending_queries = _z_pending_query_slist_push_empty(zn->_pending_queries);
+    if (zn->_pending_queries == prev_head) {
+        _Z_ERROR_LOG(_Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        return _Z_ERR_SYSTEM_OUT_OF_MEMORY;
     }
-
-    return ret;
+    _z_pending_query_t *pq = _z_pending_query_slist_value(zn->_pending_queries);
+    pq->_id = id;
+    return _Z_RES_OK;
 }
 
 static z_result_t _z_trigger_query_reply_partial_inner(_z_session_t *zn, const _z_zint_t id, _z_keyexpr_t *keyexpr,
