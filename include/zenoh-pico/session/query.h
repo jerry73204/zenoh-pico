@@ -26,7 +26,21 @@ void _z_pending_query_process_timeout(_z_session_t *zn);
 
 #if Z_FEATURE_QUERY == 1
 /*------------------ Query ------------------*/
-_z_zint_t _z_get_query_id(_z_session_t *zn);
+
+/**
+ * Allocate the next query id and increment the session's counter.
+ *
+ * This function is unsafe because it operates on potentially concurrent
+ * data: it performs a non-atomic read-modify-write on
+ * `zn->_query_id`. The caller must hold the session mutex
+ * (`zn->_mutex_inner`) for the duration of the call.
+ *
+ * Pairing the increment with the mutex is what makes the
+ * "allocate id then `_z_unsafe_register_pending_query(zn, id)`"
+ * sequence atomic — without it, two concurrent callers could observe
+ * the same counter value and race on the pending-queries slist.
+ */
+_z_zint_t _z_unsafe_get_query_id(_z_session_t *zn);
 
 _z_pending_query_t *_z_get_pending_query_by_id(_z_session_t *zn, const _z_zint_t id);
 

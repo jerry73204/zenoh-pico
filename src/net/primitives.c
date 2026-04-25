@@ -506,9 +506,16 @@ z_result_t _z_query(_z_session_t *zn, const _z_keyexpr_t *keyexpr, const char *p
     _z_transport_common_t *common = _z_transport_get_common(&zn->_tp);
     bool remote_possible = allow_remote && (common != NULL && common->_link != NULL);
 
-    // Add the pending query to the current session
-    _z_zint_t qid = _z_get_query_id(zn);
+    // Add the pending query to the current session.
+    //
+    // `_z_unsafe_get_query_id` performs a non-atomic `_query_id++`
+    // and must run under the session mutex; pairing it with
+    // `_z_unsafe_register_pending_query` inside the same critical
+    // section also makes "allocate id ⟶ register pending entry"
+    // atomic across concurrent user-thread callers (e.g. an app that
+    // splits z_get / z_querier_get across threads).
     _z_session_mutex_lock(zn);
+    _z_zint_t qid = _z_unsafe_get_query_id(zn);
     _Z_CLEAN_RETURN_IF_ERR(_z_unsafe_register_pending_query(zn, qid), _z_session_mutex_unlock(zn));
     // Create the pending query object
     _z_pending_query_t *pq = _z_pending_query_slist_value(zn->_pending_queries);

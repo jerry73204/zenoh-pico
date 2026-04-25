@@ -58,7 +58,14 @@ void _z_pending_query_process_timeout(_z_session_t *zn) {
 }
 
 /*------------------ Query ------------------*/
-_z_zint_t _z_get_query_id(_z_session_t *zn) { return zn->_query_id++; }
+
+/**
+ * This function is unsafe because it operates on potentially concurrent
+ * data. The caller must hold `zn->_mutex_inner` for the duration of
+ * the call so that the `_query_id++` read-modify-write is observed
+ * atomically by every other holder of the same mutex.
+ */
+_z_zint_t _z_unsafe_get_query_id(_z_session_t *zn) { return zn->_query_id++; }
 
 _z_pending_query_t *__z_get_pending_query_by_id(_z_pending_query_slist_t *pqls, const _z_zint_t id) {
     _z_pending_query_t *ret = NULL;
