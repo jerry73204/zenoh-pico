@@ -70,6 +70,11 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
             ret = _z_new_link_serial(zl, ep);
         } else
 #endif
+#if Z_FEATURE_LINK_IVC == 1
+            if (_z_endpoint_ivc_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_ivc(zl, ep);
+        } else
+#endif
 #if Z_FEATURE_LINK_WS == 1
             if (_z_endpoint_ws_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_ws(zl, &ep);
@@ -129,6 +134,11 @@ z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_co
 #if Z_FEATURE_LINK_BLUETOOTH == 1
             if (_z_endpoint_bt_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_bt(zl, ep);
+        } else
+#endif
+#if Z_FEATURE_LINK_IVC == 1
+            if (_z_endpoint_ivc_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_ivc(zl, ep);
         } else
 #endif
             if (_z_endpoint_raweth_valid(&ep) == _Z_RES_OK) {
@@ -246,6 +256,15 @@ const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link) {
 #if Z_FEATURE_LINK_SERIAL == 1
         case _Z_LINK_TYPE_SERIAL:
             return &link->_socket._serial._sock;
+#endif
+#if Z_FEATURE_LINK_IVC == 1
+        case _Z_LINK_TYPE_IVC:
+            // IVC has no underlying _z_sys_net_socket_t; the link
+            // dispatches via its own callbacks. Returning NULL is the
+            // documented contract for "no FD to wait on" — callers
+            // either fall back to the link's _read_socket_f or skip
+            // the FD path entirely.
+            return NULL;
 #endif
 #if Z_FEATURE_LINK_WS == 1
         case _Z_LINK_TYPE_WS:
