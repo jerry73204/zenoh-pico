@@ -37,6 +37,9 @@
 #if Z_FEATURE_LINK_SERIAL == 1
 #include "zenoh-pico/link/config/serial.h"
 #endif
+#if Z_FEATURE_LINK_IVC == 1
+#include "zenoh-pico/link/config/ivc.h"
+#endif
 #if Z_FEATURE_LINK_WS == 1
 #include "zenoh-pico/link/config/ws.h"
 #endif
@@ -402,6 +405,12 @@ z_result_t _z_endpoint_config_from_string(_z_str_intmap_t *strint, const _z_stri
             return _z_serial_config_from_strn(strint, p_start, cfg_size);
         }
 #endif
+#if Z_FEATURE_LINK_IVC == 1
+        cmp_str = _z_string_alias_str(IVC_SCHEMA);
+        if (_z_string_equals(proto, &cmp_str)) {
+            return _z_ivc_config_from_strn(strint, p_start, cfg_size);
+        }
+#endif
 #if Z_FEATURE_LINK_WS == 1
         cmp_str = _z_string_alias_str(WS_SCHEMA);
         if (_z_string_equals(proto, &cmp_str)) {
@@ -449,6 +458,12 @@ size_t _z_endpoint_config_strlen(const _z_str_intmap_t *s, _z_string_t *proto) {
         return _z_serial_config_strlen(s);
     }
 #endif
+#if Z_FEATURE_LINK_IVC == 1
+    cmp_str = _z_string_alias_str(IVC_SCHEMA);
+    if (_z_string_equals(proto, &cmp_str)) {
+        return _z_ivc_config_strlen(s);
+    }
+#endif
 #if Z_FEATURE_LINK_WS == 1
     cmp_str = _z_string_alias_str(WS_SCHEMA);
     if (_z_string_equals(proto, &cmp_str)) {
@@ -494,6 +509,12 @@ char *_z_endpoint_config_to_string(const _z_str_intmap_t *s, const _z_string_t *
     cmp_str = _z_string_alias_str(SERIAL_SCHEMA);
     if (_z_string_equals(proto, &cmp_str)) {
         return _z_serial_config_to_str(s);
+    }
+#endif
+#if Z_FEATURE_LINK_IVC == 1
+    cmp_str = _z_string_alias_str(IVC_SCHEMA);
+    if (_z_string_equals(proto, &cmp_str)) {
+        return _z_ivc_config_to_str(s);
     }
 #endif
 #if Z_FEATURE_LINK_WS == 1

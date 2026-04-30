@@ -42,6 +42,10 @@
 #include "zenoh-pico/system/link/serial.h"
 #endif
 
+#if Z_FEATURE_LINK_IVC == 1
+#include "zenoh-pico/system/link/ivc.h"
+#endif
+
 #if Z_FEATURE_LINK_WS == 1
 #include "zenoh-pico/system/link/ws.h"
 #endif
@@ -127,6 +131,7 @@ enum _z_link_type_e {
     _Z_LINK_TYPE_WS,
     _Z_LINK_TYPE_TLS,
     _Z_LINK_TYPE_RAWETH,
+    _Z_LINK_TYPE_IVC,  // Phase 100.4 — NVIDIA Tegra IVC
 };
 
 typedef struct _z_link_t {
@@ -144,6 +149,9 @@ typedef struct _z_link_t {
 #endif
 #if Z_FEATURE_LINK_SERIAL == 1
         _z_serial_socket_t _serial;
+#endif
+#if Z_FEATURE_LINK_IVC == 1
+        _z_ivc_socket_t _ivc;
 #endif
 #if Z_FEATURE_LINK_WS == 1
         _z_ws_socket_t _ws;
