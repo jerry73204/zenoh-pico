@@ -70,22 +70,36 @@ typedef struct {
 } _z_ivc_socket_t;
 
 // =============================================================================
-// C ABI provided by zpico-platform-shim::ivc_helpers (Phase 100.4 §4).
-// These five symbols dispatch through `<P as PlatformIvc>` and are the
-// entire C↔Rust contract for the new transport.
+// C ABI provided by zpico-platform-shim::ivc_helpers
+// (Phase 100.4 §4 + Phase 11.3.A zero-copy upgrade).
+//
+// Eight symbols dispatch through `<P as PlatformIvc>` and are the
+// entire C↔Rust contract for the new transport. NVIDIA's FSP IVC API
+// is fundamentally zero-copy (borrow ring slot, fill/read in place,
+// commit / release); we mirror that here so the link layer doesn't
+// memcpy through stack scratch frames every batch.
 // =============================================================================
 
 void *_z_open_ivc(uint32_t channel_id);
-size_t _z_read_ivc(void *ch, uint8_t *buf, size_t len);
-size_t _z_send_ivc(void *ch, const uint8_t *buf, size_t len);
 void _z_close_ivc(void *ch);
 void _z_ivc_notify(void *ch);
-
-// Frame size query is a sixth symbol that doesn't appear in the
-// design's "five forwarders" table because it's only called once
-// (during `_z_f_link_open_ivc` to populate `_frame_size`). Keeping it
-// separate makes the hot-path forwarders smaller.
 uint32_t _z_ivc_frame_size(void *ch);
+
+// Zero-copy RX path. `_z_ivc_rx_get` returns a pointer into the ring
+// (and writes the frame length to `*len_out`); `_z_ivc_rx_release`
+// hands the slot back to the producer. Returns NULL + `*len_out = 0`
+// if no frame is available.
+const uint8_t *_z_ivc_rx_get(void *ch, size_t *len_out);
+void _z_ivc_rx_release(void *ch);
+
+// Zero-copy TX path. `_z_ivc_tx_get` returns a writable pointer into
+// the ring (and writes the slot capacity to `*cap_out`); the caller
+// fills, then `_z_ivc_tx_commit(len)` makes the slot visible to the
+// peer. `_z_ivc_tx_abandon` frees the slot without sending. Returns
+// NULL + `*cap_out = 0` if the ring is full.
+uint8_t *_z_ivc_tx_get(void *ch, size_t *cap_out);
+void _z_ivc_tx_commit(void *ch, size_t len);
+void _z_ivc_tx_abandon(void *ch);
 
 #endif
 

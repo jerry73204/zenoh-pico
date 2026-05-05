@@ -149,6 +149,10 @@ void _z_f_link_free_ivc(_z_link_t *self) { (void)(self); }
 // Design doc §5.3: per-batch doorbell (one `_z_ivc_notify` after the
 // final fragment), `total_len` + `offset` header per frame, payload
 // up to `frame_size - 4`.
+//
+// Phase 11.3.A — zero-copy: write directly into the FSP-supplied
+// shared-memory ring slot, no stack scratch frame. Loop on
+// `_z_ivc_tx_get` until the ring drains if it's full mid-batch.
 // =============================================================================
 
 static size_t __z_ivc_send_batch(_z_ivc_socket_t *s, const uint8_t *ptr, size_t len) {
@@ -162,31 +166,49 @@ static size_t __z_ivc_send_batch(_z_ivc_socket_t *s, const uint8_t *ptr, size_t 
     const size_t frame_size = (size_t)s->_frame_size;
     const size_t payload_max = frame_size - _Z_IVC_FRAME_HEADER_SIZE;
 
-    uint8_t frame[_Z_IVC_FRAME_MAX];
     size_t off = 0;
     while (off < len) {
         size_t chunk = len - off;
         if (chunk > payload_max) {
             chunk = payload_max;
         }
-        // total_len LE16
-        frame[0] = (uint8_t)(len & 0xFF);
-        frame[1] = (uint8_t)((len >> 8) & 0xFF);
-        // offset LE16
-        frame[2] = (uint8_t)(off & 0xFF);
-        frame[3] = (uint8_t)((off >> 8) & 0xFF);
-        memcpy(&frame[_Z_IVC_FRAME_HEADER_SIZE], ptr + off, chunk);
 
-        size_t wrote = _z_send_ivc(s->_ch, frame, _Z_IVC_FRAME_HEADER_SIZE + chunk);
-        if ((wrote == SIZE_MAX) || (wrote != _Z_IVC_FRAME_HEADER_SIZE + chunk)) {
+        // Borrow the next free TX slot. On a full ring, `_z_ivc_tx_get`
+        // returns NULL — spin for the peer to drain. (Real SPE drain
+        // is sub-µs; the link-layer's outer transport layer doesn't
+        // call us until application code published, so the ring is
+        // rarely full in practice.)
+        size_t cap = 0;
+        uint8_t *slot = _z_ivc_tx_get(s->_ch, &cap);
+        if (slot == NULL) {
+            // Ring full. The contract for batch send is "all-or-nothing"
+            // — abandon nothing (we haven't claimed a slot we own) and
+            // tell the caller to retry later.
             return SIZE_MAX;
         }
+        if (cap < _Z_IVC_FRAME_HEADER_SIZE + chunk) {
+            // Backend reported a slot smaller than `frame_size` — the
+            // FSP / mock contract guarantees `cap == frame_size`, so
+            // this is a hard protocol error.
+            _z_ivc_tx_abandon(s->_ch);
+            return SIZE_MAX;
+        }
+
+        // total_len LE16
+        slot[0] = (uint8_t)(len & 0xFF);
+        slot[1] = (uint8_t)((len >> 8) & 0xFF);
+        // offset LE16
+        slot[2] = (uint8_t)(off & 0xFF);
+        slot[3] = (uint8_t)((off >> 8) & 0xFF);
+        memcpy(&slot[_Z_IVC_FRAME_HEADER_SIZE], ptr + off, chunk);
+
+        _z_ivc_tx_commit(s->_ch, _Z_IVC_FRAME_HEADER_SIZE + chunk);
         off += chunk;
     }
 
-    // Doorbell once per batch (design doc §8.1). The peer drains in a
-    // loop; per-frame notify would not buy meaningful latency at the
-    // SPE's µs-range cycle budget.
+    // Doorbell once per batch (design doc §8.1). On FSP this is
+    // redundant (commit already invokes `notify_remote`), but keep
+    // the call for symmetry with the unix-mock + bridge-daemon paths.
     _z_ivc_notify(s->_ch);
     return len;
 }
@@ -223,22 +245,19 @@ static size_t __z_ivc_recv_batch(_z_ivc_socket_t *s, uint8_t *dst, size_t dst_le
         return SIZE_MAX;
     }
 
-    const size_t frame_size = (size_t)s->_frame_size;
-    uint8_t frame[_Z_IVC_FRAME_MAX];
-
     for (;;) {
-        size_t n = _z_read_ivc(s->_ch, frame, frame_size);
-        if (n == 0) {
+        // Phase 11.3.A — borrow the next RX frame directly from the
+        // ring; release back to the producer once we've parsed.
+        size_t n = 0;
+        const uint8_t *frame = _z_ivc_rx_get(s->_ch, &n);
+        if (frame == NULL) {
             // No frame available right now. Caller (the upper transport
             // layer) treats 0 as "retry later".
             return 0;
         }
-        if (n == SIZE_MAX) {
-            __z_ivc_reset_state(s);
-            return SIZE_MAX;
-        }
         if (n < _Z_IVC_FRAME_HEADER_SIZE) {
             // Runt frame — no header. Treat as protocol error.
+            _z_ivc_rx_release(s->_ch);
             __z_ivc_reset_state(s);
             return SIZE_MAX;
         }
@@ -249,10 +268,12 @@ static size_t __z_ivc_recv_batch(_z_ivc_socket_t *s, uint8_t *dst, size_t dst_le
 
         // Reserved keep-alive ping (§5.2). Drop and keep looping.
         if ((total == 0) && (off == 0)) {
+            _z_ivc_rx_release(s->_ch);
             continue;
         }
 
         if (total > _Z_IVC_MTU_SIZE) {
+            _z_ivc_rx_release(s->_ch);
             __z_ivc_reset_state(s);
             return SIZE_MAX;
         }
@@ -263,6 +284,7 @@ static size_t __z_ivc_recv_batch(_z_ivc_socket_t *s, uint8_t *dst, size_t dst_le
             s->_bytes_received = 0;
         } else if (total != s->_expected_total) {
             // Mid-batch `total_len` change — corrupt stream / restart.
+            _z_ivc_rx_release(s->_ch);
             __z_ivc_reset_state(s);
             return SIZE_MAX;
         }
@@ -270,12 +292,16 @@ static size_t __z_ivc_recv_batch(_z_ivc_socket_t *s, uint8_t *dst, size_t dst_le
         // SPSC FIFO ⇒ no reordering. `offset` should equal the running
         // byte count; treat any deviation as protocol violation.
         if ((off != s->_bytes_received) || ((size_t)off + payload_len > (size_t)s->_expected_total)) {
+            _z_ivc_rx_release(s->_ch);
             __z_ivc_reset_state(s);
             return SIZE_MAX;
         }
 
         memcpy(s->_rx_buf + off, &frame[_Z_IVC_FRAME_HEADER_SIZE], payload_len);
         s->_bytes_received = (uint16_t)((size_t)s->_bytes_received + payload_len);
+
+        // Done with this RX frame — release before fetching next.
+        _z_ivc_rx_release(s->_ch);
 
         if (s->_bytes_received == s->_expected_total) {
             uint16_t batch_len = s->_expected_total;
