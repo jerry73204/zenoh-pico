@@ -24,6 +24,11 @@
 #include "FreeRTOS_IP.h"
 #elif defined(ZENOH_FREERTOS_LWIP)
 #include "lwip/arch.h"
+#elif defined(ZENOH_ORIN_SPE)
+// Phase 11.3.B — IVC link only, no network stack. The platform
+// header (`freertos/orin_spe.h`) brings in everything `system.c`
+// needs (FreeRTOS thread/sync primitives + `time.h` for
+// `struct timeval`).
 #else
 #error "FreeRTOS System Implementation was used but no compatible network stack was selected"
 #endif
@@ -44,6 +49,20 @@ uint32_t z_random_u32(void) {
     return ret;
 #elif defined(ZENOH_FREERTOS_LWIP)
     return LWIP_RAND();
+#elif defined(ZENOH_ORIN_SPE)
+    // Phase 11.3.B — no hardware RNG on the SPE, no lwIP /
+    // FreeRTOS-Plus-TCP. xorshift32 seeded from the FreeRTOS tick
+    // counter; adequate for zenoh-pico's SN / scout-jitter needs,
+    // **not** for crypto. The board crate's `nros-platform-orin-spe`
+    // documents the same caveat.
+    static uint32_t state = 0;
+    if (state == 0) {
+        state = (uint32_t)xTaskGetTickCount() | 1u;
+    }
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
 #else
 #error "FreeRTOS System Implementation was used but no compatible network stack was selected"
 #endif

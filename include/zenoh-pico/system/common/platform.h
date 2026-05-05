@@ -48,6 +48,8 @@
 #include "zenoh-pico/system/platform/freertos/freertos_plus_tcp.h"
 #elif defined(ZENOH_FREERTOS_LWIP)
 #include "zenoh-pico/system/platform/freertos/lwip.h"
+#elif defined(ZENOH_ORIN_SPE)
+#include "zenoh-pico/system/platform/freertos/orin_spe.h"
 #elif defined(ZENOH_RPI_PICO)
 #include "zenoh-pico/system/platform/rpi_pico.h"
 #elif defined(ZENOH_GENERIC)
