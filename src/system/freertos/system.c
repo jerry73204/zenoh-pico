@@ -28,7 +28,9 @@
 // Phase 11.3.B — IVC link only, no network stack. The platform
 // header (`freertos/orin_spe.h`) brings in everything `system.c`
 // needs (FreeRTOS thread/sync primitives + `time.h` for
-// `struct timeval`).
+// `struct timeval`). The `_z_socket_*` no-op stubs for the empty
+// `_z_sys_net_socket_t` are defined further down — see "ORIN_SPE
+// network stubs" near the bottom of this file.
 #else
 #error "FreeRTOS System Implementation was used but no compatible network stack was selected"
 #endif
@@ -448,3 +450,32 @@ z_result_t _z_get_time_since_epoch(_z_time_since_epoch *t) {
     t->nanos = (uint32_t)now.tv_usec * 1000;
     return _Z_RES_OK;
 }
+
+#if defined(ZENOH_ORIN_SPE)
+// =============================================================================
+// ORIN_SPE network stubs.
+//
+// `system/common/platform.h` declares `_z_socket_close` /
+// `_z_socket_set_non_blocking` / `_z_socket_accept` and per-platform
+// network.c usually defines them. The SPE has no socket layer (IVC
+// link only); the transport / link layers still reference
+// `_z_socket_close` from `_z_transport_peer_unicast_clear`, so we
+// have to provide a definition or the link fails. `_z_sys_net_socket_t`
+// is the empty-union from `freertos/orin_spe.h`; the stubs are pure
+// no-ops.
+// =============================================================================
+
+void _z_socket_close(_z_sys_net_socket_t *sock) { (void)sock; }
+
+z_result_t _z_socket_set_non_blocking(const _z_sys_net_socket_t *sock) {
+    (void)sock;
+    return _Z_RES_OK;
+}
+
+z_result_t _z_socket_accept(const _z_sys_net_socket_t *sock_in,
+                            _z_sys_net_socket_t *sock_out) {
+    (void)sock_in;
+    (void)sock_out;
+    return _Z_ERR_GENERIC;
+}
+#endif
