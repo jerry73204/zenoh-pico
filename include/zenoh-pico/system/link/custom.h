@@ -40,9 +40,16 @@ typedef struct {
     int32_t (*read)(void *user_data, uint8_t *buf, size_t len, uint32_t timeout_ms);
 } _z_custom_ops_t;
 
-/* Per-link socket struct embedded in `_z_link_t._socket._custom`. */
+/* Per-link socket struct embedded in `_z_link_t._socket._custom`.
+ *
+ * `_sock` is an unused stub of the platform's `_z_sys_net_socket_t`.
+ * It exists so `_z_link_get_socket()` can return a valid pointer
+ * (de-referenced by `_z_transport_peer_unicast_add` etc.) on the
+ * custom-link path; the bytes inside are never inspected — all
+ * actual I/O dispatches through the user vtable in `_ops`. */
 typedef struct {
     _z_custom_ops_t _ops;
+    _z_sys_net_socket_t _sock;
     bool _opened;
 } _z_custom_socket_t;
 
