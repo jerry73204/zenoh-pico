@@ -85,6 +85,11 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
             ret = _z_new_link_tls(zl, &ep, session_cfg);
         } else
 #endif
+#if Z_FEATURE_LINK_CUSTOM == 1
+            if (_z_endpoint_custom_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_custom(zl, ep);
+        } else
+#endif
         {
             _Z_ERROR_LOG(_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN);
             ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
