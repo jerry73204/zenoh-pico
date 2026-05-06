@@ -57,6 +57,11 @@ z_result_t _z_endpoint_tls_valid(_z_endpoint_t *ep);
 z_result_t _z_new_peer_tls(_z_endpoint_t *endpoint, _z_sys_net_socket_t *socket, const _z_config_t *session_cfg);
 z_result_t _z_new_link_tls(_z_link_t *zl, _z_endpoint_t *ep, const _z_config_t *session_cfg);
 #endif
+#if Z_FEATURE_LINK_CUSTOM == 1
+// nros: Phase 115.B
+z_result_t _z_endpoint_custom_valid(_z_endpoint_t *ep);
+z_result_t _z_new_link_custom(_z_link_t *zl, _z_endpoint_t ep);
+#endif
 
 #ifdef __cplusplus
 }
