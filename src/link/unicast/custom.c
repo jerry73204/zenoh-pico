@@ -93,7 +93,11 @@ size_t _z_f_link_read_custom(const _z_link_t *self, uint8_t *ptr, size_t len, _z
      * the wait. Future minor bump can plumb a real timeout
      * through. */
     int32_t r = self->_socket._custom._ops.read(self->_socket._custom._ops.user_data, ptr, len, 0u);
-    return (r < 0) ? 0u : (size_t)r;
+    /* Negative ⇒ user signalled error (typically peer-close);
+     * surface to caller as SIZE_MAX so the reader treats it as a
+     * fatal recv condition. 0 ⇒ no data this poll (timeout). */
+    if (r < 0) return SIZE_MAX;
+    return (size_t)r;
 }
 
 size_t _z_f_link_read_exact_custom(const _z_link_t *self, uint8_t *ptr, size_t len,
@@ -131,7 +135,11 @@ z_result_t _z_new_link_custom(_z_link_t *zl, _z_endpoint_t endpoint) {
     z_result_t ret = _Z_RES_OK;
     zl->_type = _Z_LINK_TYPE_CUSTOM;
     zl->_cap._transport = Z_LINK_CAP_TRANSPORT_UNICAST;
-    zl->_cap._flow = Z_LINK_CAP_FLOW_DATAGRAM;
+    /* Stream-flow: zenoh-pico adds the 2-byte LE length prefix
+     * before each batch, so the user vtable just passes raw bytes
+     * to whatever stream-shaped medium they have (TCP, USB-CDC,
+     * UART). This matches the most common bridging use-case. */
+    zl->_cap._flow = Z_LINK_CAP_FLOW_STREAM;
     zl->_cap._is_reliable = false;
 
     zl->_mtu = _z_get_link_mtu_custom();
