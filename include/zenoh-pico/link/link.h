@@ -54,6 +54,10 @@
 #include "zenoh-pico/system/link/tls.h"
 #endif
 
+#if Z_FEATURE_LINK_CUSTOM == 1
+#include "zenoh-pico/system/link/custom.h"
+#endif
+
 #include "zenoh-pico/utils/result.h"
 
 #ifdef __cplusplus
@@ -131,7 +135,8 @@ enum _z_link_type_e {
     _Z_LINK_TYPE_WS,
     _Z_LINK_TYPE_TLS,
     _Z_LINK_TYPE_RAWETH,
-    _Z_LINK_TYPE_IVC,  // Phase 100.4 — NVIDIA Tegra IVC
+    _Z_LINK_TYPE_IVC,     // Phase 100.4 — NVIDIA Tegra IVC
+    _Z_LINK_TYPE_CUSTOM,  // nros: Phase 115.B — runtime-pluggable user transport
 };
 
 typedef struct _z_link_t {
@@ -161,6 +166,9 @@ typedef struct _z_link_t {
 #endif
 #if Z_FEATURE_RAWETH_TRANSPORT == 1
         _z_raweth_socket_t _raweth;
+#endif
+#if Z_FEATURE_LINK_CUSTOM == 1
+        _z_custom_socket_t _custom;  // nros: Phase 115.B
 #endif
     } _socket;
 
