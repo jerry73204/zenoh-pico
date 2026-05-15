@@ -16,7 +16,9 @@
 
 #if defined(ZP_PLATFORM_SOCKET_LWIP) && (Z_FEATURE_LINK_TCP == 1 || Z_FEATURE_LINK_TLS == 1 || Z_FEATURE_LINK_WS == 1)
 
+#include <errno.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -26,8 +28,89 @@
 #include "zenoh-pico/utils/logging.h"
 #include "zenoh-pico/utils/pointers.h"
 
+static char _z_lwip_numeric_addrinfo_marker;
+
+static z_result_t _z_connect_tcp_timeout(int sock, const struct sockaddr *addr, socklen_t addrlen, uint32_t tout) {
+    int original_flags = lwip_fcntl(sock, F_GETFL, 0);
+    if (original_flags == -1) {
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+    if (lwip_fcntl(sock, F_SETFL, original_flags | O_NONBLOCK) == -1) {
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+
+    int rc = connect(sock, addr, addrlen);
+    if (rc == 0) {
+        (void)lwip_fcntl(sock, F_SETFL, original_flags);
+        return _Z_RES_OK;
+    }
+
+    int err = errno;
+    if ((err != EINPROGRESS) && (err != EALREADY) && (err != EWOULDBLOCK)) {
+        (void)lwip_fcntl(sock, F_SETFL, original_flags);
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(sock, &write_fds);
+
+    struct timeval tv;
+    tv.tv_sec = tout / (uint32_t)1000;
+    tv.tv_usec = (tout % (uint32_t)1000) * (uint32_t)1000;
+
+    rc = lwip_select(sock + 1, NULL, &write_fds, NULL, &tv);
+    if (rc <= 0) {
+        (void)lwip_fcntl(sock, F_SETFL, original_flags);
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+
+    socklen_t optlen = sizeof(err);
+    err = 0;
+    if ((lwip_getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &optlen) < 0) || (err != 0)) {
+        (void)lwip_fcntl(sock, F_SETFL, original_flags);
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+
+    if (lwip_fcntl(sock, F_SETFL, original_flags) == -1) {
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+
+    return _Z_RES_OK;
+}
+
 static z_result_t _z_tcp_lwip_endpoint_init(_z_sys_net_endpoint_t *ep, const char *s_address, const char *s_port) {
     z_result_t ret = _Z_RES_OK;
+
+    ip4_addr_t ip4;
+    if (ip4addr_aton(s_address, &ip4) == 1) {
+        char *end = NULL;
+        unsigned long port = strtoul(s_port, &end, 10);
+        if ((end == s_port) || (*end != '\0') || (port > 65535UL)) {
+            _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+        }
+
+        struct addrinfo *ai = (struct addrinfo *)calloc(1, sizeof(struct addrinfo));
+        struct sockaddr_in *addr = (struct sockaddr_in *)calloc(1, sizeof(struct sockaddr_in));
+        if ((ai == NULL) || (addr == NULL)) {
+            free(ai);
+            free(addr);
+            _Z_ERROR_RETURN(_Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        }
+
+        addr->sin_family = AF_INET;
+        addr->sin_port = lwip_htons((uint16_t)port);
+        addr->sin_addr.s_addr = ip4.addr;
+
+        ai->ai_family = AF_INET;
+        ai->ai_socktype = SOCK_STREAM;
+        ai->ai_protocol = IPPROTO_TCP;
+        ai->ai_addrlen = sizeof(struct sockaddr_in);
+        ai->ai_addr = (struct sockaddr *)addr;
+        ai->ai_canonname = &_z_lwip_numeric_addrinfo_marker;
+        ep->_iptcp = ai;
+        return ret;
+    }
 
     struct addrinfo hints;
     ep->_iptcp = NULL;
@@ -49,6 +132,12 @@ static z_result_t _z_tcp_lwip_endpoint_init(_z_sys_net_endpoint_t *ep, const cha
 
 static void _z_tcp_lwip_endpoint_clear(_z_sys_net_endpoint_t *ep) {
     if ((ep == NULL) || (ep->_iptcp == NULL)) {
+        return;
+    }
+    if (ep->_iptcp->ai_canonname == &_z_lwip_numeric_addrinfo_marker) {
+        free(ep->_iptcp->ai_addr);
+        free(ep->_iptcp);
+        ep->_iptcp = NULL;
         return;
     }
 
@@ -110,7 +199,8 @@ static z_result_t _z_tcp_lwip_open(_z_sys_net_socket_t *sock, const _z_sys_net_e
         }
 
         for (struct addrinfo *it = endpoint._iptcp; it != NULL; it = it->ai_next) {
-            if ((ret == _Z_RES_OK) && (connect(_z_lwip_socket_get(*sock), it->ai_addr, it->ai_addrlen) < 0)) {
+            if ((ret == _Z_RES_OK) &&
+                (_z_connect_tcp_timeout(_z_lwip_socket_get(*sock), it->ai_addr, it->ai_addrlen, tout) != _Z_RES_OK)) {
                 if (it->ai_next == NULL) {
                     _Z_ERROR_LOG(_Z_ERR_GENERIC);
                     ret = _Z_ERR_GENERIC;
@@ -242,6 +332,19 @@ static size_t _z_tcp_lwip_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t le
 #if LWIP_NETCONN_SEM_PER_THREAD
     lwip_socket_thread_init();
 #endif
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(_z_lwip_socket_get(sock), &read_fds);
+
+    struct timeval tv;
+    tv.tv_sec = Z_CONFIG_SOCKET_TIMEOUT / (uint32_t)1000;
+    tv.tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % (uint32_t)1000) * (uint32_t)1000;
+
+    int ready = lwip_select(_z_lwip_socket_get(sock) + 1, &read_fds, NULL, NULL, &tv);
+    if (ready <= 0) {
+        return SIZE_MAX;
+    }
+
     ssize_t rb = recv(_z_lwip_socket_get(sock), ptr, len, 0);
     if (rb < (ssize_t)0) {
         return SIZE_MAX;
@@ -272,6 +375,19 @@ static size_t _z_tcp_lwip_write(_z_sys_net_socket_t sock, const uint8_t *ptr, si
 #if LWIP_NETCONN_SEM_PER_THREAD
     lwip_socket_thread_init();
 #endif
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(_z_lwip_socket_get(sock), &write_fds);
+
+    struct timeval tv;
+    tv.tv_sec = Z_CONFIG_SOCKET_TIMEOUT / (uint32_t)1000;
+    tv.tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % (uint32_t)1000) * (uint32_t)1000;
+
+    int ready = lwip_select(_z_lwip_socket_get(sock) + 1, NULL, &write_fds, NULL, &tv);
+    if (ready <= 0) {
+        return SIZE_MAX;
+    }
+
     return (size_t)send(_z_lwip_socket_get(sock), ptr, len, 0);
 }
 
