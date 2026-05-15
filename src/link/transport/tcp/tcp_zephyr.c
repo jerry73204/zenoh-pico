@@ -33,7 +33,11 @@ static z_result_t _z_tcp_zephyr_endpoint_init(_z_sys_net_endpoint_t *ep, const c
     struct zsock_addrinfo hints;
     ep->_iptcp = NULL;
     (void)memset(&hints, 0, sizeof(hints));
+#if defined(CONFIG_POSIX_IPV6)
     hints.ai_family = PF_UNSPEC;
+#else
+    hints.ai_family = AF_INET;
+#endif
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = 0;
     hints.ai_protocol = IPPROTO_TCP;
