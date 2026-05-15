@@ -35,8 +35,16 @@
 #if Z_FEATURE_LINK_TCP == 1
 static char _z_lwip_numeric_addrinfo_marker;
 
+static void _z_lwip_thread_init(void) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
+}
+
 static z_result_t _z_connect_tcp_timeout(int sock, const struct sockaddr *addr,
                                          socklen_t addrlen, uint32_t tout) {
+    _z_lwip_thread_init();
+
     int original_flags = lwip_fcntl(sock, F_GETFL, 0);
     if (original_flags == -1) {
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
@@ -87,6 +95,8 @@ static z_result_t _z_connect_tcp_timeout(int sock, const struct sockaddr *addr,
 }
 
 z_result_t _z_socket_set_non_blocking(const _z_sys_net_socket_t *sock) {
+    _z_lwip_thread_init();
+
     int flags = lwip_fcntl(sock->_socket, F_GETFL, 0);
     if (flags == -1) {
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
@@ -98,6 +108,8 @@ z_result_t _z_socket_set_non_blocking(const _z_sys_net_socket_t *sock) {
 }
 
 z_result_t _z_socket_accept(const _z_sys_net_socket_t *sock_in, _z_sys_net_socket_t *sock_out) {
+    _z_lwip_thread_init();
+
     struct sockaddr naddr;
     socklen_t nlen = sizeof(naddr);
     sock_out->_socket = -1;
@@ -138,12 +150,16 @@ z_result_t _z_socket_accept(const _z_sys_net_socket_t *sock_in, _z_sys_net_socke
 }
 
 void _z_socket_close(_z_sys_net_socket_t *sock) {
+    _z_lwip_thread_init();
+
     shutdown(sock->_socket, SHUT_RDWR);
     lwip_close(sock->_socket);
 }
 
 #if Z_FEATURE_MULTI_THREAD == 1
 z_result_t _z_socket_wait_event(void *v_peers, _z_mutex_rec_t *mutex) {
+    _z_lwip_thread_init();
+
     fd_set read_fds;
     FD_ZERO(&read_fds);
     // Create select mask
@@ -190,6 +206,8 @@ z_result_t _z_socket_wait_event(void *peers, _z_mutex_rec_t *mutex) {
 
 /*------------------ TCP sockets ------------------*/
 z_result_t _z_create_endpoint_tcp(_z_sys_net_endpoint_t *ep, const char *s_address, const char *s_port) {
+    _z_lwip_thread_init();
+
     z_result_t ret = _Z_RES_OK;
 
     ip4_addr_t ip4;
@@ -240,6 +258,8 @@ z_result_t _z_create_endpoint_tcp(_z_sys_net_endpoint_t *ep, const char *s_addre
 }
 
 void _z_free_endpoint_tcp(_z_sys_net_endpoint_t *ep) {
+    _z_lwip_thread_init();
+
     if (ep->_iptcp == NULL) {
         return;
     }
@@ -256,9 +276,7 @@ void _z_free_endpoint_tcp(_z_sys_net_endpoint_t *ep) {
 z_result_t _z_open_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t rep, uint32_t tout) {
     z_result_t ret = _Z_RES_OK;
 
-#if LWIP_NETCONN_SEM_PER_THREAD
-    lwip_socket_thread_init();
-#endif
+    _z_lwip_thread_init();
     sock->_socket = socket(rep._iptcp->ai_family, rep._iptcp->ai_socktype, rep._iptcp->ai_protocol);
     if (sock->_socket != -1) {
         z_time_t tv;
@@ -333,6 +351,8 @@ z_result_t _z_open_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t re
 z_result_t _z_listen_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t lep) {
     z_result_t ret = _Z_RES_OK;
 
+    _z_lwip_thread_init();
+
     sock->_socket = socket(lep._iptcp->ai_family, lep._iptcp->ai_socktype, lep._iptcp->ai_protocol);
     if (sock->_socket == -1) {
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
@@ -381,6 +401,8 @@ z_result_t _z_listen_tcp(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t 
 }
 
 void _z_close_tcp(_z_sys_net_socket_t *sock) {
+    _z_lwip_thread_init();
+
     if (sock->_socket >= 0) {
         shutdown(sock->_socket, SHUT_RDWR);
         close(sock->_socket);
@@ -389,9 +411,8 @@ void _z_close_tcp(_z_sys_net_socket_t *sock) {
 }
 
 size_t _z_read_tcp(const _z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
-#if LWIP_NETCONN_SEM_PER_THREAD
-    lwip_socket_thread_init();
-#endif
+    _z_lwip_thread_init();
+
     fd_set read_fds;
     FD_ZERO(&read_fds);
     FD_SET(sock._socket, &read_fds);
@@ -432,9 +453,8 @@ size_t _z_read_exact_tcp(const _z_sys_net_socket_t sock, uint8_t *ptr, size_t le
 }
 
 size_t _z_send_tcp(const _z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
-#if LWIP_NETCONN_SEM_PER_THREAD
-    lwip_socket_thread_init();
-#endif
+    _z_lwip_thread_init();
+
     fd_set write_fds;
     FD_ZERO(&write_fds);
     FD_SET(sock._socket, &write_fds);
