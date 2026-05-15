@@ -224,7 +224,11 @@ z_result_t _z_create_endpoint_tcp(_z_sys_net_endpoint_t *ep, const char *s_addre
 
     struct addrinfo hints;
     (void)memset(&hints, 0, sizeof(hints));
+#if defined(CONFIG_POSIX_IPV6)
     hints.ai_family = PF_UNSPEC;  // Allow IPv4 or IPv6
+#else
+    hints.ai_family = AF_INET;
+#endif
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = 0;
     hints.ai_protocol = IPPROTO_TCP;
