@@ -30,7 +30,15 @@
 
 static char _z_lwip_numeric_addrinfo_marker;
 
+static void _z_lwip_thread_init(void) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
+}
+
 static z_result_t _z_connect_tcp_timeout(int sock, const struct sockaddr *addr, socklen_t addrlen, uint32_t tout) {
+    _z_lwip_thread_init();
+
     int original_flags = lwip_fcntl(sock, F_GETFL, 0);
     if (original_flags == -1) {
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
@@ -80,6 +88,8 @@ static z_result_t _z_connect_tcp_timeout(int sock, const struct sockaddr *addr, 
 }
 
 static z_result_t _z_tcp_lwip_endpoint_init(_z_sys_net_endpoint_t *ep, const char *s_address, const char *s_port) {
+    _z_lwip_thread_init();
+
     z_result_t ret = _Z_RES_OK;
 
     ip4_addr_t ip4;
@@ -131,6 +141,8 @@ static z_result_t _z_tcp_lwip_endpoint_init(_z_sys_net_endpoint_t *ep, const cha
 }
 
 static void _z_tcp_lwip_endpoint_clear(_z_sys_net_endpoint_t *ep) {
+    _z_lwip_thread_init();
+
     if ((ep == NULL) || (ep->_iptcp == NULL)) {
         return;
     }
@@ -148,9 +160,8 @@ static void _z_tcp_lwip_endpoint_clear(_z_sys_net_endpoint_t *ep) {
 static z_result_t _z_tcp_lwip_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout) {
     z_result_t ret = _Z_RES_OK;
 
-#if LWIP_NETCONN_SEM_PER_THREAD
-    lwip_socket_thread_init();
-#endif
+    _z_lwip_thread_init();
+
     _z_lwip_socket_set(sock,
                        socket(endpoint._iptcp->ai_family, endpoint._iptcp->ai_socktype, endpoint._iptcp->ai_protocol));
     if (_z_lwip_socket_get(*sock) != -1) {
@@ -224,6 +235,8 @@ static z_result_t _z_tcp_lwip_open(_z_sys_net_socket_t *sock, const _z_sys_net_e
 }
 
 static z_result_t _z_tcp_lwip_listen(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint) {
+    _z_lwip_thread_init();
+
     z_result_t ret = _Z_RES_OK;
 
     _z_lwip_socket_set(sock,
@@ -281,6 +294,8 @@ static z_result_t _z_tcp_lwip_listen(_z_sys_net_socket_t *sock, const _z_sys_net
 }
 
 static z_result_t _z_tcp_lwip_accept(const _z_sys_net_socket_t *sock_in, _z_sys_net_socket_t *sock_out) {
+    _z_lwip_thread_init();
+
     struct sockaddr naddr;
     socklen_t nlen = sizeof(naddr);
     _z_lwip_socket_set(sock_out, -1);
@@ -321,6 +336,8 @@ static z_result_t _z_tcp_lwip_accept(const _z_sys_net_socket_t *sock_in, _z_sys_
 }
 
 static void _z_tcp_lwip_close(_z_sys_net_socket_t *sock) {
+    _z_lwip_thread_init();
+
     if (_z_lwip_socket_get(*sock) >= 0) {
         shutdown(_z_lwip_socket_get(*sock), SHUT_RDWR);
         close(_z_lwip_socket_get(*sock));
@@ -329,9 +346,8 @@ static void _z_tcp_lwip_close(_z_sys_net_socket_t *sock) {
 }
 
 static size_t _z_tcp_lwip_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
-#if LWIP_NETCONN_SEM_PER_THREAD
-    lwip_socket_thread_init();
-#endif
+    _z_lwip_thread_init();
+
     fd_set read_fds;
     FD_ZERO(&read_fds);
     FD_SET(_z_lwip_socket_get(sock), &read_fds);
@@ -372,9 +388,8 @@ static size_t _z_tcp_lwip_read_exact(_z_sys_net_socket_t sock, uint8_t *ptr, siz
 }
 
 static size_t _z_tcp_lwip_write(_z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
-#if LWIP_NETCONN_SEM_PER_THREAD
-    lwip_socket_thread_init();
-#endif
+    _z_lwip_thread_init();
+
     fd_set write_fds;
     FD_ZERO(&write_fds);
     FD_SET(_z_lwip_socket_get(sock), &write_fds);

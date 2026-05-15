@@ -27,7 +27,15 @@
 #include "zenoh-pico/utils/result.h"
 
 #if defined(ZP_PLATFORM_SOCKET_LINKS_ENABLED) && (Z_FEATURE_LINK_TCP == 1 || Z_FEATURE_LINK_UDP_UNICAST == 1)
+static void _z_lwip_thread_init(void) {
+#if LWIP_NETCONN_SEM_PER_THREAD
+    lwip_socket_thread_init();
+#endif
+}
+
 z_result_t _z_socket_set_blocking(const _z_sys_net_socket_t *sock, bool blocking) {
+    _z_lwip_thread_init();
+
     int fd = _z_lwip_socket_get(*sock);
     int flags = lwip_fcntl(fd, F_GETFL, 0);
     if (flags == -1) {
@@ -40,6 +48,8 @@ z_result_t _z_socket_set_blocking(const _z_sys_net_socket_t *sock, bool blocking
 }
 
 void _z_socket_close(_z_sys_net_socket_t *sock) {
+    _z_lwip_thread_init();
+
     int fd = _z_lwip_socket_get(*sock);
     if (fd >= 0) {
         shutdown(fd, SHUT_RDWR);
@@ -49,6 +59,8 @@ void _z_socket_close(_z_sys_net_socket_t *sock) {
 }
 
 z_result_t _z_socket_wait_readable(_z_socket_wait_iter_t *iter, uint32_t timeout_ms) {
+    _z_lwip_thread_init();
+
     fd_set read_fds;
     int max_fd = 0;
     bool has_sockets = false;
