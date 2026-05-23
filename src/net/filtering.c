@@ -239,7 +239,14 @@ z_result_t _z_write_filter_create(const _z_session_rc_t *zn, _z_write_filter_t *
 #if Z_FEATURE_MULTI_THREAD == 1
     _Z_CLEAN_RETURN_IF_ERR(_z_mutex_init(&ctx->mutex), _z_keyexpr_clear(&ke); z_free(ctx));
 #endif
+#if Z_FEATURE_MULTI_THREAD == 0
+    // Single-threaded embedded clients do not have a background read task to
+    // learn remote matches before the application's first write. Start open
+    // so early publishes reach the router while interest state catches up.
+    ctx->state = WRITE_FILTER_OFF;
+#else
     ctx->state = WRITE_FILTER_ACTIVE;
+#endif
     ctx->targets = _z_filter_target_slist_new();
 #if Z_FEATURE_MATCHING
     _z_closure_matching_status_intmap_init(&ctx->callbacks);
