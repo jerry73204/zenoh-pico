@@ -40,6 +40,11 @@
 #include "zenoh-pico/utils/logging.h"
 
 /*------------------ Random ------------------*/
+/* nano-ros platform-layer split (RFC-0034 / phase-230 Wave 2): when
+ * Z_FEATURE_NROS_PLATFORM_RANDOM is defined the consumer supplies
+ * z_random_* from its scalar alias TU (-> nros_platform_random_*), so guard
+ * the vendored RNG out. Default (feature off) keeps the stock behaviour. */
+#ifndef Z_FEATURE_NROS_PLATFORM_RANDOM
 uint8_t z_random_u8(void) { return z_random_u32(); }
 
 uint16_t z_random_u16(void) { return z_random_u32(); }
@@ -84,6 +89,7 @@ void z_random_fill(void *buf, size_t len) {
         p[i] = z_random_u8();
     }
 }
+#endif /* !Z_FEATURE_NROS_PLATFORM_RANDOM */
 
 /*------------------ Memory ------------------*/
 /* nano-ros platform-layer split (RFC-0034 / phase-230 1c): when the
@@ -376,6 +382,10 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
 #endif  // Z_MULTI_THREAD == 1
 
 /*------------------ Sleep ------------------*/
+/* RFC-0034 / phase-230 Wave 2: guarded out when the consumer funnels sleep
+ * through the scalar alias TU (-> nros_platform_sleep_*). Clock below stays
+ * vendored — z_clock_t is FreeRTOS's TickType_t, not a portable scalar. */
+#ifndef Z_FEATURE_NROS_PLATFORM_SLEEP
 z_result_t z_sleep_us(size_t time) {
     vTaskDelay(pdMS_TO_TICKS(time / 1000));
     return _Z_RES_OK;
@@ -390,6 +400,7 @@ z_result_t z_sleep_s(size_t time) {
     vTaskDelay(pdMS_TO_TICKS(time * 1000));
     return _Z_RES_OK;
 }
+#endif /* !Z_FEATURE_NROS_PLATFORM_SLEEP */
 
 /*------------------ Clock ------------------*/
 z_clock_t z_clock_now(void) { return xTaskGetTickCount(); }
