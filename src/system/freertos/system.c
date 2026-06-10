@@ -86,6 +86,15 @@ void z_random_fill(void *buf, size_t len) {
 }
 
 /*------------------ Memory ------------------*/
+/* nano-ros platform-layer split (RFC-0034 / phase-230 1c): when the
+ * consumer funnels zenoh-pico's heap through the canonical
+ * `nros_platform_alloc` ABI, it defines `Z_FEATURE_NROS_PLATFORM_ALLOC` and
+ * supplies `z_malloc`/`z_realloc`/`z_free` from its memory-only alias TU
+ * (`nros_platform_alloc`/`_realloc`/`_dealloc`). Guard the vendored
+ * `pvPortMalloc` defs out in that mode so a single heap funnel (and a single
+ * stats counter) sees every allocation. Default (feature off) keeps the
+ * stock FreeRTOS heap_4 behaviour. */
+#ifndef Z_FEATURE_NROS_PLATFORM_ALLOC
 void *z_malloc(size_t size) {
     if (size == 0) {
         return NULL;
@@ -116,6 +125,7 @@ void *z_realloc(void *ptr, size_t size) {
 }
 
 void z_free(void *ptr) { vPortFree(ptr); }
+#endif /* !Z_FEATURE_NROS_PLATFORM_ALLOC */
 
 #if Z_FEATURE_MULTI_THREAD == 1
 /*------------------ Thread ------------------*/
