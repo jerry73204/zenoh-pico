@@ -23,10 +23,18 @@
 #define Z_FRAG_MAX_SIZE 4096
 #define Z_BATCH_UNICAST_SIZE 2048
 #define Z_BATCH_MULTICAST_SIZE 2048
-#if defined(ZENOH_NUTTX) || defined(ZENOH_ZEPHYR)
+#ifndef Z_CONFIG_SOCKET_TIMEOUT
+#ifdef ZENOH_NUTTX
 #define Z_CONFIG_SOCKET_TIMEOUT 5000
 #else
+/* Zephyr must NOT use a long timeout: zsock serializes send/recv on a
+ * per-fd mutex, so the blocking read task holds the socket for a full
+ * SO_RCVTIMEO window between inbound packets and every tx (declare,
+ * lease keepalive, publish, reply) stalls behind it. At 5000 ms the
+ * client keepalives miss the 10 s lease and the router drops the
+ * session. 100 ms matches the unix/freertos ports. */
 #define Z_CONFIG_SOCKET_TIMEOUT 100
+#endif
 #endif
 #define Z_TRANSPORT_LEASE 10000
 #define Z_TRANSPORT_LEASE_EXPIRE_FACTOR 3
