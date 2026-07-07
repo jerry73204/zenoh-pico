@@ -59,6 +59,18 @@ static z_result_t _z_unicast_transport_create_inner(_z_transport_unicast_t *ztu,
     // Initialize tx rx buffers
     ztu->_common._wbuf = _z_wbuf_make(wbuf_size, false);
     ztu->_common._zbuf = _z_zbuf_make(zbuf_size);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    // phase-282 (#145) — spare wbuf the batch flush swaps in while it sends the
+    // stolen one outside `_mutex_tx`; same capacity as the primary.
+    ztu->_common._wbuf_spare = _z_wbuf_make(wbuf_size, false);
+#if Z_FEATURE_MULTI_THREAD == 1
+    _Z_RETURN_IF_ERR(_z_mutex_init(&ztu->_common._mutex_link_tx));
+#endif
+    if (_z_wbuf_capacity(&ztu->_common._wbuf_spare) != wbuf_size) {
+        _Z_ERROR("Not enough memory to allocate transport buffers!");
+        _Z_ERROR_RETURN(_Z_ERR_SYSTEM_OUT_OF_MEMORY);
+    }
+#endif
 
     // Check if a buffer failed to allocate
     if ((_z_wbuf_capacity(&ztu->_common._wbuf) != wbuf_size) || (_z_zbuf_capacity(&ztu->_common._zbuf) != zbuf_size)) {
@@ -97,6 +109,12 @@ z_result_t _z_unicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
 #endif
         _z_wbuf_clear(&ztu->_common._wbuf);
         _z_zbuf_clear(&ztu->_common._zbuf);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+        _z_wbuf_clear(&ztu->_common._wbuf_spare);
+#if Z_FEATURE_MULTI_THREAD == 1
+        _z_mutex_drop(&ztu->_common._mutex_link_tx);
+#endif
+#endif
     }
     return ret;
 }

@@ -75,6 +75,12 @@ z_result_t _z_multicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
     if (ret == _Z_RES_OK) {
         uint16_t mtu = (zl->_mtu < Z_BATCH_MULTICAST_SIZE) ? zl->_mtu : Z_BATCH_MULTICAST_SIZE;
         ztm->_common._wbuf = _z_wbuf_make(mtu, false);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    ztm->_common._wbuf_spare = _z_wbuf_make(mtu, false);
+#if Z_FEATURE_MULTI_THREAD == 1
+    _z_mutex_init(&ztm->_common._mutex_link_tx);
+#endif
+#endif
         ztm->_common._zbuf = _z_zbuf_make(Z_BATCH_MULTICAST_SIZE);
 
         // Clean up the buffers if one of them failed to be allocated

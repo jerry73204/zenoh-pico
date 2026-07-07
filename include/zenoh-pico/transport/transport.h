@@ -171,6 +171,19 @@ typedef struct {
     uint8_t _batch_state;
     size_t _batch_count;
 #endif
+// nano-ros phase-282 (#145) — split tx locking: the batch flush STEALS the
+// pending wbuf (swap with the spare) under `_mutex_tx`, then performs the
+// socket write under `_mutex_link_tx` only, so publishers can append to the
+// fresh batch while the (slow, e.g. Zephyr zsock fd-window) send is in
+// flight. Wire order == SN/encode order is preserved because every writer
+// acquires `_mutex_link_tx` while still holding `_mutex_tx` (lock order
+// tx -> link, never reversed).
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    _z_wbuf_t _wbuf_spare;
+#if Z_FEATURE_MULTI_THREAD == 1
+    _z_mutex_t _mutex_link_tx;
+#endif
+#endif
 } _z_transport_common_t;
 
 // Send function prototype
@@ -279,6 +292,18 @@ static inline z_result_t _z_transport_tx_mutex_lock(_z_transport_common_t *ztc, 
     }
 }
 static inline void _z_transport_tx_mutex_unlock(_z_transport_common_t *ztc) { _z_mutex_unlock(&ztc->_mutex_tx); }
+// phase-282 (#145) — the link-write mutex serializes the actual socket writes.
+// No-ops unless Z_FEATURE_TX_SPLIT_LOCK; falls back to being covered by
+// `_mutex_tx` otherwise (the pre-split behavior).
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _z_mutex_lock(&ztc->_mutex_link_tx); }
+static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) {
+    _z_mutex_unlock(&ztc->_mutex_link_tx);
+}
+#else
+static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
+static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
+#endif
 static inline void _z_transport_rx_mutex_lock(_z_transport_common_t *ztc) { _z_mutex_lock(&ztc->_mutex_rx); }
 static inline void _z_transport_rx_mutex_unlock(_z_transport_common_t *ztc) { _z_mutex_unlock(&ztc->_mutex_rx); }
 static inline void _z_transport_peer_mutex_lock(_z_transport_common_t *ztc) {
@@ -294,6 +319,8 @@ static inline z_result_t _z_transport_tx_mutex_lock(_z_transport_common_t *ztc, 
     return _Z_RES_OK;
 }
 static inline void _z_transport_tx_mutex_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
+static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
+static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_rx_mutex_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_rx_mutex_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_peer_mutex_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }

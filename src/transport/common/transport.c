@@ -53,12 +53,18 @@ void _z_transport_common_stop_tasks(_z_transport_common_t *ztc, bool detach_task
 void _z_transport_common_clear(_z_transport_common_t *ztc) {
 #if Z_FEATURE_MULTI_THREAD == 1
     // Clean up the mutexes
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    _z_mutex_drop(&ztc->_mutex_link_tx);
+#endif
     _z_mutex_drop(&ztc->_mutex_tx);
     _z_mutex_drop(&ztc->_mutex_rx);
     _z_mutex_rec_drop(&ztc->_mutex_peer);
 #endif
     // Clean up the buffers
     _z_wbuf_clear(&ztc->_wbuf);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    _z_wbuf_clear(&ztc->_wbuf_spare);
+#endif
     _z_zbuf_clear(&ztc->_zbuf);
 
     _z_link_free(&ztc->_link);
