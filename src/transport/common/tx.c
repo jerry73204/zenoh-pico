@@ -136,13 +136,11 @@ static inline bool _z_transport_tx_batch_has_data(_z_transport_common_t *ztc) {
 #endif
 }
 
-// phase-282 (#145) — the raw wire write for an already-FINALIZED buffer, under
-// the link-write mutex. Callers must NOT hold `_mutex_link_tx`; they MAY hold
-// `_mutex_tx` (lock order tx -> link).
-static z_result_t _z_transport_tx_send_finalized(_z_transport_common_t *ztc, const _z_wbuf_t *wbuf,
-                                                 _z_transport_peer_unicast_slist_t *peers) {
+// phase-282 (#145) — the raw wire write for an already-FINALIZED buffer.
+// Caller MUST hold `_mutex_link_tx` (lock order: tx -> link).
+static z_result_t _z_transport_tx_send_finalized_locked(_z_transport_common_t *ztc, const _z_wbuf_t *wbuf,
+                                                        _z_transport_peer_unicast_slist_t *peers) {
     z_result_t ret = _Z_RES_OK;
-    _z_transport_link_tx_lock(ztc);
     if (peers == NULL) {
         ret = _z_link_send_wbuf(ztc->_link, wbuf, NULL);
     } else {
@@ -154,17 +152,44 @@ static z_result_t _z_transport_tx_send_finalized(_z_transport_common_t *ztc, con
             curr_list = _z_transport_peer_unicast_slist_next(curr_list);
         }
     }
-    _z_transport_link_tx_unlock(ztc);
     if (ret == _Z_RES_OK) {
         ztc->_transmitted = true;  // Tell session we transmitted data
     }
     return ret;
 }
 
+// phase-282 W2.c (#145) — ship a batch parked by the overflow steal. Caller
+// must hold `_mutex_tx` AND `_mutex_link_tx`: the spare buffer is read by
+// sends under the LINK mutex and swapped by steals under BOTH, so every spare
+// access requires the link mutex (this closes the race where a concurrent
+// overflow swapped into the spare while a detached send was reading it).
+static z_result_t _z_transport_tx_drain_pending_spare_locked(_z_transport_common_t *ztc,
+                                                             _z_transport_peer_unicast_slist_t *peers) {
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    if (ztc->_spare_pending) {
+        z_result_t ret = _z_transport_tx_send_finalized_locked(ztc, &ztc->_wbuf_spare, peers);
+        _z_wbuf_reset(&ztc->_wbuf_spare);
+        ztc->_spare_pending = false;
+        return ret;
+    }
+#else
+    _ZP_UNUSED(ztc);
+    _ZP_UNUSED(peers);
+#endif
+    return _Z_RES_OK;
+}
+
 static z_result_t _z_transport_tx_flush_buffer(_z_transport_common_t *ztc, _z_transport_peer_unicast_slist_t *peers) {
     __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
-    // Send network message
-    _Z_RETURN_IF_ERR(_z_transport_tx_send_finalized(ztc, &ztc->_wbuf, peers));
+    _z_transport_link_tx_lock(ztc);
+    // Ship any overflow-parked batch first (older SNs), then this buffer —
+    // one link-mutex hold covers both, so nothing interleaves between them.
+    z_result_t ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+    if (ret == _Z_RES_OK) {
+        ret = _z_transport_tx_send_finalized_locked(ztc, &ztc->_wbuf, peers);
+    }
+    _z_transport_link_tx_unlock(ztc);
+    _Z_RETURN_IF_ERR(ret);
 #if Z_FEATURE_BATCHING == 1
     ztc->_batch_count = 0;
 #endif
@@ -192,8 +217,34 @@ static z_result_t _z_transport_tx_batch_overflow(_z_transport_common_t *ztc, con
 #if Z_FEATURE_BATCHING == 1
     // Remove partially encoded data
     _z_wbuf_set_wpos(&ztc->_wbuf, prev_wpos);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    // phase-282 W2.c (#145) — steal, don't send: park the full batch in the
+    // spare and return immediately; the next flush (flush thread / t_msg /
+    // express / cadence) ships it. The overflowing PUBLISHER no longer pays
+    // the socket wait — measured as the 2.5x streaming cap when the overflow
+    // sent inline. If a previous stolen batch is still parked, ship it now
+    // (natural backpressure: at most one parked batch). Spare access requires
+    // the link mutex: this also WAITS for any detached send that is reading
+    // the spare, so the swap can never corrupt an in-flight write.
+    __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
+    _z_transport_link_tx_lock(ztc);
+    {
+        z_result_t drain_ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+        if (drain_ret != _Z_RES_OK) {
+            _z_transport_link_tx_unlock(ztc);
+            return drain_ret;
+        }
+        _z_wbuf_t stolen = ztc->_wbuf;
+        ztc->_wbuf = ztc->_wbuf_spare;
+        ztc->_wbuf_spare = stolen;
+        ztc->_spare_pending = true;
+        ztc->_batch_count = 0;
+    }
+    _z_transport_link_tx_unlock(ztc);
+#else
     // Send batch
     _Z_RETURN_IF_ERR(_z_transport_tx_flush_buffer(ztc, peers));
+#endif
     // Init buffer
     __unsafe_z_prepare_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
     sn = _z_transport_tx_get_sn(ztc, reliability);
@@ -298,7 +349,7 @@ z_result_t _z_transport_tx_send_t_msg_wrapper(_z_transport_common_t *ztc, const 
 }
 
 z_result_t _z_transport_tx_try_send_t_msg(_z_transport_common_t *ztc, const _z_transport_message_t *t_msg,
-                                           _z_transport_peer_unicast_slist_t *peers) {
+                                          _z_transport_peer_unicast_slist_t *peers) {
     // Non-blocking variant: skip the send if the TX mutex is busy.
     // Used by the lease task for keep-alive sends to avoid contending
     // with the app task's entity declarations on _mutex_tx.
@@ -336,6 +387,24 @@ static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_con
                                                _z_transport_peer_unicast_slist_t *peers) {
 #if Z_FEATURE_BATCHING == 1
     z_result_t ret = _Z_RES_OK;
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    // A parked overflow batch must ship even when the current batch is empty.
+    if (ztc->_batch_count == 0 && ztc->_spare_pending) {
+        if (!_z_transport_batch_hold_tx_mutex()) {
+            ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);
+        }
+        if (ret != _Z_RES_OK) {
+            return ret;
+        }
+        _z_transport_link_tx_lock(ztc);
+        ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+        _z_transport_link_tx_unlock(ztc);
+        if (!_z_transport_batch_hold_tx_mutex()) {
+            _z_transport_tx_mutex_unlock(ztc);
+        }
+        return ret;
+    }
+#endif
     // Check batch size
     if (ztc->_batch_count > 0) {
         // Acquire the lock and drop the message if needed
@@ -357,29 +426,30 @@ static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_con
         // order (a newer express/immediate send cannot overtake the batch).
         if (ztc->_batch_count > 0) {
             __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
+            // Take the LINK mutex before releasing the tx mutex: wire order
+            // stays == SN order, and the spare (our send buffer) cannot be
+            // touched by a concurrent overflow steal (spare access requires
+            // the link mutex).
+            _z_transport_link_tx_lock(ztc);
+            // Ship any overflow-parked batch first (older SNs).
+            ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+            if (ret != _Z_RES_OK) {
+                _z_transport_link_tx_unlock(ztc);
+                if (!_z_transport_batch_hold_tx_mutex()) {
+                    _z_transport_tx_mutex_unlock(ztc);
+                }
+                return ret;
+            }
             _z_wbuf_t stolen = ztc->_wbuf;
             ztc->_wbuf = ztc->_wbuf_spare;
             ztc->_wbuf_spare = stolen;
             ztc->_batch_count = 0;
-            _z_transport_link_tx_lock(ztc);
             if (!_z_transport_batch_hold_tx_mutex()) {
                 _z_transport_tx_mutex_unlock(ztc);
             }
-            if (peers == NULL) {
-                ret = _z_link_send_wbuf(ztc->_link, &ztc->_wbuf_spare, NULL);
-            } else {
-                _z_transport_peer_unicast_slist_t *curr_list = peers;
-                while (curr_list != NULL) {
-                    _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(curr_list);
-                    _z_link_send_wbuf(ztc->_link, &ztc->_wbuf_spare, &curr_peer->_socket);
-                    curr_list = _z_transport_peer_unicast_slist_next(curr_list);
-                }
-            }
-            _z_transport_link_tx_unlock(ztc);
-            if (ret == _Z_RES_OK) {
-                ztc->_transmitted = true;
-            }
+            ret = _z_transport_tx_send_finalized_locked(ztc, &ztc->_wbuf_spare, peers);
             _z_wbuf_reset(&ztc->_wbuf_spare);
+            _z_transport_link_tx_unlock(ztc);
             return ret;
         }
         if (!_z_transport_batch_hold_tx_mutex()) {
