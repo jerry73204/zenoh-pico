@@ -158,6 +158,10 @@ typedef struct {
 // tx -> link, never reversed).
 #if Z_FEATURE_TX_SPLIT_LOCK == 1
     _z_wbuf_t _wbuf_spare;
+    // A batch stolen by the OVERFLOW path (finalized, unsent) parks here until
+    // the next flush ships it — the overflowing publisher returns without
+    // paying the socket wait. Guarded by `_mutex_tx`.
+    bool _spare_pending;
 #if Z_FEATURE_MULTI_THREAD == 1
     _z_mutex_t _mutex_link_tx;
 #endif
@@ -256,9 +260,7 @@ static inline void _z_transport_tx_mutex_unlock(_z_transport_common_t *ztc) { _z
 // `_mutex_tx` otherwise (the pre-split behavior).
 #if Z_FEATURE_TX_SPLIT_LOCK == 1
 static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _z_mutex_lock(&ztc->_mutex_link_tx); }
-static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) {
-    _z_mutex_unlock(&ztc->_mutex_link_tx);
-}
+static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _z_mutex_unlock(&ztc->_mutex_link_tx); }
 #else
 static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }

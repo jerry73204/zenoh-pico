@@ -63,6 +63,7 @@ static z_result_t _z_unicast_transport_create_inner(_z_transport_unicast_t *ztu,
     // phase-282 (#145) — spare wbuf the batch flush swaps in while it sends the
     // stolen one outside `_mutex_tx`; same capacity as the primary.
     ztu->_common._wbuf_spare = _z_wbuf_make(wbuf_size, false);
+    ztu->_common._spare_pending = false;
 #if Z_FEATURE_MULTI_THREAD == 1
     _Z_RETURN_IF_ERR(_z_mutex_init(&ztu->_common._mutex_link_tx));
 #endif
