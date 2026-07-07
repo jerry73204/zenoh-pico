@@ -128,6 +128,13 @@
 #ifndef Z_FEATURE_BATCHING
 #define Z_FEATURE_BATCHING 1
 #endif
+// nano-ros phase-282 (#145) — split tx locking: batch flush steals the wbuf
+// under _mutex_tx and writes the socket under _mutex_link_tx only, so
+// publishers append while a slow send is in flight. Default OFF.
+#ifndef Z_FEATURE_TX_SPLIT_LOCK
+#define Z_FEATURE_TX_SPLIT_LOCK 0
+#endif
+
 #ifndef Z_FEATURE_BATCH_TX_MUTEX
 #define Z_FEATURE_BATCH_TX_MUTEX 0
 #endif
