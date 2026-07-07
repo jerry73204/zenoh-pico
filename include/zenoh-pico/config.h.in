@@ -78,6 +78,14 @@
 
 #endif /* ZENOH_GENERIC */
 
+/*--- nano-ros knobs: defaults for feature flags our patch line adds; any build may override ---*/
+// nano-ros phase-282 (#145) — split tx locking: batch flush steals the wbuf
+// under _mutex_tx and writes the socket under _mutex_link_tx only, so
+// publishers append while a slow send is in flight. Default OFF.
+#ifndef Z_FEATURE_TX_SPLIT_LOCK
+#define Z_FEATURE_TX_SPLIT_LOCK 0
+#endif
+
 /*------------------ Runtime configuration properties ------------------*/
 /**
  * The library mode.

@@ -136,21 +136,35 @@ static inline bool _z_transport_tx_batch_has_data(_z_transport_common_t *ztc) {
 #endif
 }
 
-static z_result_t _z_transport_tx_flush_buffer(_z_transport_common_t *ztc, _z_transport_peer_unicast_slist_t *peers) {
-    __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
-    // Send network message
+// phase-282 (#145) — the raw wire write for an already-FINALIZED buffer, under
+// the link-write mutex. Callers must NOT hold `_mutex_link_tx`; they MAY hold
+// `_mutex_tx` (lock order tx -> link).
+static z_result_t _z_transport_tx_send_finalized(_z_transport_common_t *ztc, const _z_wbuf_t *wbuf,
+                                                 _z_transport_peer_unicast_slist_t *peers) {
+    z_result_t ret = _Z_RES_OK;
+    _z_transport_link_tx_lock(ztc);
     if (peers == NULL) {
-        _Z_RETURN_IF_ERR(_z_link_send_wbuf(ztc->_link, &ztc->_wbuf, NULL));
+        ret = _z_link_send_wbuf(ztc->_link, wbuf, NULL);
     } else {
         _z_transport_peer_unicast_slist_t *curr_list = peers;
         while (curr_list != NULL) {
             _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(curr_list);
             // Send on peer socket
-            _z_link_send_wbuf(ztc->_link, &ztc->_wbuf, &curr_peer->_socket);
+            _z_link_send_wbuf(ztc->_link, wbuf, &curr_peer->_socket);
             curr_list = _z_transport_peer_unicast_slist_next(curr_list);
         }
     }
-    ztc->_transmitted = true;  // Tell session we transmitted data
+    _z_transport_link_tx_unlock(ztc);
+    if (ret == _Z_RES_OK) {
+        ztc->_transmitted = true;  // Tell session we transmitted data
+    }
+    return ret;
+}
+
+static z_result_t _z_transport_tx_flush_buffer(_z_transport_common_t *ztc, _z_transport_peer_unicast_slist_t *peers) {
+    __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
+    // Send network message
+    _Z_RETURN_IF_ERR(_z_transport_tx_send_finalized(ztc, &ztc->_wbuf, peers));
 #if Z_FEATURE_BATCHING == 1
     ztc->_batch_count = 0;
 #endif
@@ -334,11 +348,51 @@ static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_con
         }
         // Send batch
         _Z_DEBUG("Send network batch");
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+        // phase-282 (#145) — STEAL the pending batch instead of sending under
+        // `_mutex_tx`: finalize + swap the wbuf with the spare, then release
+        // `_mutex_tx` so publishers append to the fresh batch while the (slow)
+        // socket write happens under `_mutex_link_tx` only. The link mutex is
+        // acquired BEFORE `_mutex_tx` is released so wire order == SN/encode
+        // order (a newer express/immediate send cannot overtake the batch).
+        if (ztc->_batch_count > 0) {
+            __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
+            _z_wbuf_t stolen = ztc->_wbuf;
+            ztc->_wbuf = ztc->_wbuf_spare;
+            ztc->_wbuf_spare = stolen;
+            ztc->_batch_count = 0;
+            _z_transport_link_tx_lock(ztc);
+            if (!_z_transport_batch_hold_tx_mutex()) {
+                _z_transport_tx_mutex_unlock(ztc);
+            }
+            if (peers == NULL) {
+                ret = _z_link_send_wbuf(ztc->_link, &ztc->_wbuf_spare, NULL);
+            } else {
+                _z_transport_peer_unicast_slist_t *curr_list = peers;
+                while (curr_list != NULL) {
+                    _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(curr_list);
+                    _z_link_send_wbuf(ztc->_link, &ztc->_wbuf_spare, &curr_peer->_socket);
+                    curr_list = _z_transport_peer_unicast_slist_next(curr_list);
+                }
+            }
+            _z_transport_link_tx_unlock(ztc);
+            if (ret == _Z_RES_OK) {
+                ztc->_transmitted = true;
+            }
+            _z_wbuf_reset(&ztc->_wbuf_spare);
+            return ret;
+        }
+        if (!_z_transport_batch_hold_tx_mutex()) {
+            _z_transport_tx_mutex_unlock(ztc);
+        }
+        return _Z_RES_OK;
+#else
         ret = _z_transport_tx_flush_buffer(ztc, peers);
         if (!_z_transport_batch_hold_tx_mutex()) {
             _z_transport_tx_mutex_unlock(ztc);
         }
         return ret;
+#endif
     }
     return _Z_RES_OK;
 #else
