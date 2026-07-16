@@ -38,7 +38,16 @@ void _z_transport_set_send_n_msg_override(_z_session_send_override_fn fn) { _z_s
 static inline bool _z_transport_tx_get_express_status(const _z_network_message_t *msg) {
     switch (msg->_tag) {
         case _Z_N_DECLARE:
-            return _Z_HAS_FLAG(msg->_body._declare._ext_qos._val, _Z_N_QOS_IS_EXPRESS_FLAG);
+            // phase-290 / nano-ros #213 — declarations ALWAYS bypass the tx
+            // batch. Declares (subscriber/queryable/liveliness tokens) are
+            // rare, tiny control-plane messages; batching them buys no
+            // throughput but delays them past app-level readiness signals:
+            // an action server's "ready" banner printed after z_declare_*
+            // returns outran its still-batched queryable declaration by a
+            // flush period, so a client's immediately-fired (express) goal
+            // query found "no matching queryables" at the router and the
+            // exchange hung. Same treatment as requests/replies below.
+            return true;
         case _Z_N_PUSH:
             return _Z_HAS_FLAG(msg->_body._push._qos._val, _Z_N_QOS_IS_EXPRESS_FLAG);
         case _Z_N_REQUEST:
