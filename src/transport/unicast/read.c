@@ -132,6 +132,28 @@ z_result_t _zp_unicast_read(_z_transport_unicast_t *ztu, bool single_read) {
         if (_z_unicast_client_read(ztu, curr_peer, &to_read)) {
             // Process data
             _Z_RETURN_IF_ERR(_z_unicast_process_messages(ztu, curr_peer, to_read))
+            // Drain every complete frame already buffered: one recv can pull
+            // multiple stream frames (e.g. batched interest replies), but the
+            // next poll's `_z_zbuf_reset` above DISCARDS unread bytes — a
+            // frame left here is silently lost (declares/interest replies
+            // vanished on the polled multi-executor path; nano-ros
+            // phase-297 W5).
+            while (_z_zbuf_len(&ztu->_common._zbuf) >= _Z_MSG_LEN_ENC_SIZE) {
+                size_t more = _z_read_stream_size(&ztu->_common._zbuf);
+                if (_z_zbuf_len(&ztu->_common._zbuf) < more) {
+                    // Partial trailing frame: finish it like
+                    // `_z_unicast_client_read` does (the remainder is
+                    // already in flight).
+                    _z_link_socket_recv_zbuf(ztu->_common._link, &ztu->_common._zbuf, curr_peer->_socket);
+                    if (_z_zbuf_len(&ztu->_common._zbuf) < more) {
+                        _z_zbuf_set_rpos(&ztu->_common._zbuf,
+                                         _z_zbuf_get_rpos(&ztu->_common._zbuf) - _Z_MSG_LEN_ENC_SIZE);
+                        _z_zbuf_compact(&ztu->_common._zbuf);
+                        break;
+                    }
+                }
+                _Z_RETURN_IF_ERR(_z_unicast_process_messages(ztu, curr_peer, more))
+            }
         } else {
             return _Z_NO_DATA_PROCESSED;
         }
