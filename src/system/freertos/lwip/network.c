@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "FreeRTOS.h"
+#include "task.h"
 #include "lwip/api.h"
 #include "lwip/dns.h"
 #include "lwip/ip4_addr.h"
@@ -455,20 +456,45 @@ size_t _z_read_exact_tcp(const _z_sys_net_socket_t sock, uint8_t *ptr, size_t le
 size_t _z_send_tcp(const _z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
     _z_lwip_thread_init();
 
-    fd_set write_fds;
-    FD_ZERO(&write_fds);
-    FD_SET(sock._socket, &write_fds);
+    // Drain loop (nano-ros issue 0269): the link layer's `write_all`
+    // callers assume a full write, but lwIP's send buffers are tiny
+    // (TCP_SND_BUF is typically a few MSS and TCP_SND_QUEUELEN a couple
+    // dozen segments), so a burst of small writes — e.g. the DECLARE
+    // storm of a many-entity session open — short-writes or fails with
+    // ERR_MEM/EWOULDBLOCK long before the unix-sized buffers would.
+    // Loop select+send until every byte is accepted; each iteration
+    // gets the full socket timeout, so a stalled peer still errors out.
+    size_t sent = 0;
+    while (sent < len) {
+        fd_set write_fds;
+        FD_ZERO(&write_fds);
+        FD_SET(sock._socket, &write_fds);
 
-    struct timeval tv;
-    tv.tv_sec = Z_CONFIG_SOCKET_TIMEOUT / (uint32_t)1000;
-    tv.tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % (uint32_t)1000) * (uint32_t)1000;
+        struct timeval tv;
+        tv.tv_sec = Z_CONFIG_SOCKET_TIMEOUT / (uint32_t)1000;
+        tv.tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % (uint32_t)1000) * (uint32_t)1000;
 
-    int ready = lwip_select(sock._socket + 1, NULL, &write_fds, NULL, &tv);
-    if (ready <= 0) {
-        return SIZE_MAX;
+        int ready = lwip_select(sock._socket + 1, NULL, &write_fds, NULL, &tv);
+        if (ready <= 0) {
+            return SIZE_MAX;
+        }
+
+        int wb = send(sock._socket, ptr + sent, len - sent, 0);
+        if (wb < 0) {
+            // Writable per select, yet the write was refused: lwIP can
+            // still return ERR_MEM/EWOULDBLOCK when the segment queue
+            // (TCP_SND_QUEUELEN) is exhausted even though byte-space
+            // remains. Yield until ACKs free segments, then retry.
+            if (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
+            return SIZE_MAX;
+        }
+        sent += (size_t)wb;
     }
 
-    return send(sock._socket, ptr, len, 0);
+    return sent;
 }
 #else
 z_result_t _z_socket_set_non_blocking(const _z_sys_net_socket_t *sock) {
