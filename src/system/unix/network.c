@@ -34,6 +34,13 @@
 
 #include "zenoh-pico/collections/string.h"
 #include "zenoh-pico/config.h"
+#if Z_FEATURE_LINK_SERIAL == 1
+// `_z_open_serial_from_dev` below calls `_z_connect_serial`, declared here.
+// Without this include the call is an IMPLICIT DECLARATION: a warning on
+// gcc <= 13, a hard error on gcc >= 14 and clang >= 15, which made the unix
+// build fail outright on any host with a current compiler.
+#include "zenoh-pico/system/common/serial.h"
+#endif
 #if Z_FEATURE_LINK_TLS == 1
 #include "zenoh-pico/system/link/tls.h"
 #endif
