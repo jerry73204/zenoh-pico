@@ -46,6 +46,15 @@
 #if Z_FEATURE_LINK_TLS == 1
 #include "zenoh-pico/link/config/tls.h"
 #endif
+#if Z_FEATURE_LINK_CUSTOM == 1
+// Declares `_z_custom_config_to_str`, called under the same guard in
+// `_z_endpoint_config_to_str`. Every other link type's config header is
+// included here; custom was missed, so with the feature ON the call was an
+// IMPLICIT DECLARATION returning int — a warning on gcc <= 13, and on gcc >= 14
+// a hard `-Wint-conversion` error ("returning 'int' from a function with return
+// type 'char *'"). Same class as the missing common/serial.h include.
+#include "zenoh-pico/link/config/custom.h"
+#endif
 #include "zenoh-pico/link/config/raweth.h"
 
 /*------------------ Locator ------------------*/
