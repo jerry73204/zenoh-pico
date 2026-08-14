@@ -124,8 +124,25 @@ z_result_t _zp_unicast_read(_z_transport_unicast_t *ztu, bool single_read) {
         // Update buffer
         _Z_RETURN_IF_ERR(_z_unicast_update_rx_buffer(ztu));
     } else {
-        // Prepare buffer
-        _z_zbuf_reset(&ztu->_common._zbuf);
+        // Prepare buffer.
+        //
+        // nano-ros issue #567 — RESET ONLY WHEN THE BUFFER IS EMPTY.
+        // This used to reset unconditionally, which meant the function
+        // could never return with bytes unread: anything left behind was
+        // discarded on the next call. That is why the drain loop below
+        // has to consume every complete frame it can see, and why a
+        // budget on that loop is lossy rather than deferring work.
+        //
+        // Compacting instead preserves the remainder, and
+        // `_z_unicast_client_read` below is already written to work with
+        // pre-existing buffered bytes: it only recv()s when it holds
+        // fewer than the length prefix, and rewinds its read position
+        // when a frame is incomplete.
+        if (_z_zbuf_len(&ztu->_common._zbuf) == 0) {
+            _z_zbuf_reset(&ztu->_common._zbuf);
+        } else {
+            _z_zbuf_compact(&ztu->_common._zbuf);
+        }
         size_t to_read = 0;
         // Retrieve data if any
         if (_z_unicast_client_read(ztu, curr_peer, &to_read)) {
