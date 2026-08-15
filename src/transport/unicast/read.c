@@ -306,6 +306,19 @@ static int _z_unicast_peer_read(_z_transport_unicast_t *ztu, _z_transport_peer_u
 static z_result_t _zp_unicast_process_peer_event(_z_transport_unicast_t *ztu) {
     _z_transport_peer_mutex_lock(&ztu->_common);
     _z_transport_peer_unicast_slist_t *curr_list = ztu->_peers;
+    // nano-ros issue #506 — can a partial remainder survive this pass?
+    //
+    // `_zbuf` is SHARED across the peer list, and the reset at the end of each
+    // peer's turn is what stops peer A's leftover bytes being parsed as peer
+    // B's stream. So the conditional reset #567 gave the polled
+    // `_zp_unicast_read` CANNOT simply be mirrored here.
+    //
+    // With exactly one peer there is no other stream to contaminate, so the
+    // remainder can be kept — which is what makes a drain budget on this path
+    // DEFER work instead of dropping it. Client mode (the embedded island) is
+    // always this case. With several peers the reset stays unconditional and a
+    // budget here would still be lossy.
+    const bool single_peer = (curr_list != NULL) && (_z_transport_peer_unicast_slist_next(curr_list) == NULL);
     _z_transport_peer_unicast_slist_t *prev = NULL;
     _z_transport_peer_unicast_slist_t *prev_drop = NULL;
     size_t to_read = 0;
@@ -356,7 +369,15 @@ static z_result_t _zp_unicast_process_peer_event(_z_transport_unicast_t *ztu) {
             _z_interest_peer_disconnected(zs, &curr_peer->common);
             ztu->_peers = _z_transport_peer_unicast_slist_drop_element(ztu->_peers, prev_drop);
         }
-        _z_zbuf_reset(&ztu->_common._zbuf);
+        // issue #506 — keep an unread remainder only when it can belong to
+        // nobody else (see `single_peer` above). `_z_unicast_peer_read` already
+        // copes with pre-existing buffered bytes: it appends its recv and then
+        // tests the accumulated length against the frame prefix.
+        if (single_peer && _z_zbuf_len(&ztu->_common._zbuf) > 0) {
+            _z_zbuf_compact(&ztu->_common._zbuf);
+        } else {
+            _z_zbuf_reset(&ztu->_common._zbuf);
+        }
     }
     _z_transport_peer_mutex_unlock(&ztu->_common);
     return _Z_RES_OK;
