@@ -161,7 +161,7 @@ static z_result_t _z_tcp_zephyr_listen(_z_sys_net_socket_t *sock, const _z_sys_n
 
 static z_result_t _z_tcp_zephyr_accept(const _z_sys_net_socket_t *sock_in, _z_sys_net_socket_t *sock_out) {
     struct sockaddr naddr;
-    unsigned int nlen = sizeof(naddr);
+    socklen_t nlen = sizeof(naddr);
     sock_out->_fd = -1;
     int con_socket = accept(sock_in->_fd, &naddr, &nlen);
     if (con_socket < 0) {

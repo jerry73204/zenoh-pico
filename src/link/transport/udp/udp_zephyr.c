@@ -89,7 +89,7 @@ static void _z_udp_zephyr_close(_z_sys_net_socket_t *sock) {
 
 static size_t _z_udp_zephyr_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
     struct sockaddr_storage raddr;
-    unsigned int addrlen = sizeof(struct sockaddr_storage);
+    socklen_t addrlen = sizeof(struct sockaddr_storage);
 
     ssize_t rb = recvfrom(sock._fd, ptr, len, 0, (struct sockaddr *)&raddr, &addrlen);
     if (rb < (ssize_t)0) {
