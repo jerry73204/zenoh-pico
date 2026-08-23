@@ -39,6 +39,8 @@
 #endif
 #if Z_FEATURE_LINK_IVC == 1
 #include "zenoh-pico/link/config/ivc.h"
+#endif
+#if Z_FEATURE_LINK_CAN == 1
 #include "zenoh-pico/link/config/can.h"
 #endif
 #if Z_FEATURE_LINK_WS == 1
