@@ -27,20 +27,26 @@ extern "C" {
 
 #if Z_FEATURE_LINK_CAN == 1
 
-// Endpoint: can/<device>#bitrate=<n>;dbitrate=<n>;tx_id=<n>;rx_id=<n>
+// Endpoint: can/<device>#bitrate=<n>;dbitrate=<n>;id=<n>;match=<n>;mask=<n>
 //
 //   device   the CAN interface name ("can0", "vcan0", or on Zephyr the
 //            devicetree node label)
 //   bitrate  arbitration-phase bit rate; also the sole rate for classic CAN
 //   dbitrate CAN FD data-phase bit rate. 0 selects classic CAN (8-byte frames)
-//   tx_id    CAN identifier this peer transmits on
-//   rx_id    CAN identifier this peer receives on
+//   id       THIS peer's identifier. It transmits on this, and every other
+//            peer sees it as this peer's address.
+//   match    accept frames whose (id & mask) == match
+//   mask     0 (the default) accepts every identifier on the bus
 //
-// tx_id and rx_id are deliberately explicit rather than derived from a base,
-// so a future multi-peer scheme can extend the same grammar without changing
-// the meaning of an existing endpoint (RFC-0080 section 4.2).
+// A CAN bus is a broadcast medium, so the link is MULTICAST: peers do not pair
+// off, they all listen and filter. `match`/`mask` exist so zenoh can share a
+// bus with ordinary vehicle traffic by claiming an identifier band rather than
+// the whole bus.
+//
+// Identifier value IS bus priority on CAN — a lower identifier wins
+// arbitration — so the choice is a real-time decision, not a free one.
 
-#define CAN_CONFIG_ARGC 4
+#define CAN_CONFIG_ARGC 5
 
 #define CAN_CONFIG_BITRATE_KEY 0x01
 #define CAN_CONFIG_BITRATE_STR "bitrate"
@@ -48,28 +54,34 @@ extern "C" {
 #define CAN_CONFIG_DBITRATE_KEY 0x02
 #define CAN_CONFIG_DBITRATE_STR "dbitrate"
 
-#define CAN_CONFIG_TX_ID_KEY 0x03
-#define CAN_CONFIG_TX_ID_STR "tx_id"
+#define CAN_CONFIG_ID_KEY 0x03
+#define CAN_CONFIG_ID_STR "id"
 
-#define CAN_CONFIG_RX_ID_KEY 0x04
-#define CAN_CONFIG_RX_ID_STR "rx_id"
+#define CAN_CONFIG_MATCH_KEY 0x04
+#define CAN_CONFIG_MATCH_STR "match"
 
-#define CAN_CONFIG_MAPPING_BUILD                   \
-    _z_str_intmapping_t args[CAN_CONFIG_ARGC];     \
-    args[0]._key = CAN_CONFIG_BITRATE_KEY;         \
-    args[0]._str = (char *)CAN_CONFIG_BITRATE_STR; \
-    args[1]._key = CAN_CONFIG_DBITRATE_KEY;        \
+#define CAN_CONFIG_MASK_KEY 0x05
+#define CAN_CONFIG_MASK_STR "mask"
+
+#define CAN_CONFIG_MAPPING_BUILD                    \
+    _z_str_intmapping_t args[CAN_CONFIG_ARGC];      \
+    args[0]._key = CAN_CONFIG_BITRATE_KEY;          \
+    args[0]._str = (char *)CAN_CONFIG_BITRATE_STR;  \
+    args[1]._key = CAN_CONFIG_DBITRATE_KEY;         \
     args[1]._str = (char *)CAN_CONFIG_DBITRATE_STR; \
-    args[2]._key = CAN_CONFIG_TX_ID_KEY;           \
-    args[2]._str = (char *)CAN_CONFIG_TX_ID_STR;   \
-    args[3]._key = CAN_CONFIG_RX_ID_KEY;           \
-    args[3]._str = (char *)CAN_CONFIG_RX_ID_STR;
+    args[2]._key = CAN_CONFIG_ID_KEY;               \
+    args[2]._str = (char *)CAN_CONFIG_ID_STR;       \
+    args[3]._key = CAN_CONFIG_MATCH_KEY;            \
+    args[3]._str = (char *)CAN_CONFIG_MATCH_STR;    \
+    args[4]._key = CAN_CONFIG_MASK_KEY;             \
+    args[4]._str = (char *)CAN_CONFIG_MASK_STR;
 
 // Defaults when a key is absent from the endpoint.
 #define CAN_CONFIG_DEFAULT_BITRATE 500000u
 #define CAN_CONFIG_DEFAULT_DBITRATE 2000000u
-#define CAN_CONFIG_DEFAULT_TX_ID 0x100u
-#define CAN_CONFIG_DEFAULT_RX_ID 0x101u
+#define CAN_CONFIG_DEFAULT_ID 0x100u
+#define CAN_CONFIG_DEFAULT_MATCH 0u
+#define CAN_CONFIG_DEFAULT_MASK 0u
 
 size_t _z_can_config_strlen(const _z_str_intmap_t *s);
 void _z_can_config_onto_str(char *dst, size_t dst_len, const _z_str_intmap_t *s);

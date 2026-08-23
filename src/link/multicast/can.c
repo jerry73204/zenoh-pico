@@ -90,7 +90,7 @@ static uint32_t __z_can_cfg_u32(const _z_str_intmap_t *cfg, uint8_t key, uint32_
     return any ? acc : dflt;
 }
 
-static z_result_t __z_can_open(_z_link_t *self, _Bool listen) {
+static z_result_t __z_can_open(_z_link_t *self) {
     char dev[_Z_CAN_DEV_MAX];
     size_t addr_len = _z_string_len(&self->_endpoint._locator._address);
     if (addr_len >= sizeof(dev)) {
@@ -102,25 +102,18 @@ static z_result_t __z_can_open(_z_link_t *self, _Bool listen) {
     const _z_str_intmap_t *cfg = &self->_endpoint._config;
     uint32_t bitrate = __z_can_cfg_u32(cfg, CAN_CONFIG_BITRATE_KEY, CAN_CONFIG_DEFAULT_BITRATE);
     uint32_t dbitrate = __z_can_cfg_u32(cfg, CAN_CONFIG_DBITRATE_KEY, CAN_CONFIG_DEFAULT_DBITRATE);
-    uint32_t tx_id = __z_can_cfg_u32(cfg, CAN_CONFIG_TX_ID_KEY, CAN_CONFIG_DEFAULT_TX_ID);
-    uint32_t rx_id = __z_can_cfg_u32(cfg, CAN_CONFIG_RX_ID_KEY, CAN_CONFIG_DEFAULT_RX_ID);
+    uint32_t id = __z_can_cfg_u32(cfg, CAN_CONFIG_ID_KEY, CAN_CONFIG_DEFAULT_ID);
+    uint32_t match = __z_can_cfg_u32(cfg, CAN_CONFIG_MATCH_KEY, CAN_CONFIG_DEFAULT_MATCH);
+    uint32_t mask = __z_can_cfg_u32(cfg, CAN_CONFIG_MASK_KEY, CAN_CONFIG_DEFAULT_MASK);
 
-    if (tx_id == rx_id) {
-        // Both directions on one identifier means every peer reads its own
-        // transmissions back on a bus that echoes, and there is no way to tell
-        // them apart. Refuse rather than produce a link that half-works.
-        _Z_ERROR("CAN: tx_id and rx_id must differ");
+    // A peer that filtered out its own identifier would never be reachable by
+    // anyone, which is a configuration error rather than a quiet degradation.
+    if ((mask != 0u) && ((id & mask) != match)) {
+        _Z_ERROR("CAN: id 0x%x is outside its own match/mask band", (unsigned)id);
         return _Z_ERR_CONFIG_LOCATOR_INVALID;
     }
 
-    // The listen side is the same bus with the identifiers swapped: whatever
-    // the connecting peer transmits on is what this side must receive on.
-    // CAN has no connection setup, so this is the entire difference.
-    uint32_t local_tx = listen ? rx_id : tx_id;
-    uint32_t local_rx = listen ? tx_id : rx_id;
-
-    z_result_t ret = listen ? _z_listen_can(&self->_socket._can, dev, bitrate, dbitrate, local_tx, local_rx)
-                            : _z_open_can(&self->_socket._can, dev, bitrate, dbitrate, local_tx, local_rx);
+    z_result_t ret = _z_open_can(&self->_socket._can, dev, bitrate, dbitrate, id, match, mask);
     if (ret != _Z_RES_OK) {
         return ret;
     }
@@ -133,9 +126,10 @@ static z_result_t __z_can_open(_z_link_t *self, _Bool listen) {
     return _Z_RES_OK;
 }
 
-z_result_t _z_f_link_open_can(_z_link_t *self) { return __z_can_open(self, false); }
+z_result_t _z_f_link_open_can(_z_link_t *self) { return __z_can_open(self); }
 
-z_result_t _z_f_link_listen_can(_z_link_t *self) { return __z_can_open(self, true); }
+// Multicast peers all listen; there is no connect/accept pairing on a bus.
+z_result_t _z_f_link_listen_can(_z_link_t *self) { return __z_can_open(self); }
 
 void _z_f_link_close_can(_z_link_t *self) { _z_close_can(&self->_socket._can); }
 
@@ -154,17 +148,17 @@ size_t _z_f_link_write_all_can(const _z_link_t *self, const uint8_t *ptr, size_t
 }
 
 size_t _z_f_link_read_can(const _z_link_t *self, uint8_t *ptr, size_t len, _z_slice_t *addr) {
-    _ZP_UNUSED(addr);
-    return _z_read_can(&self->_socket._can, ptr, len);
+    // `addr` carries the sender's identifier back to the multicast transport,
+    // which uses it to tell peers apart (`_remote_addr` in multicast/rx.c).
+    return _z_read_can(&self->_socket._can, ptr, len, addr);
 }
 
 size_t _z_f_link_read_exact_can(const _z_link_t *self, uint8_t *ptr, size_t len, _z_slice_t *addr,
                                 _z_sys_net_socket_t *socket) {
-    _ZP_UNUSED(addr);
     _ZP_UNUSED(socket);
     // "Exact" and "best-effort" collapse on a datagram link: one call returns
     // one whole datagram or fails. Same reasoning as the IVC link.
-    return _z_read_can(&self->_socket._can, ptr, len);
+    return _z_read_can(&self->_socket._can, ptr, len, addr);
 }
 
 size_t _z_f_link_read_socket_can(const _z_sys_net_socket_t socket, uint8_t *ptr, size_t len) {
@@ -183,7 +177,11 @@ uint16_t _z_get_link_mtu_can(void) { return _Z_CAN_MTU_SIZE; }
 
 z_result_t _z_new_link_can(_z_link_t *zl, _z_endpoint_t endpoint) {
     zl->_type = _Z_LINK_TYPE_CAN;
-    zl->_cap._transport = Z_LINK_CAP_TRANSPORT_UNICAST;
+    // A CAN bus is a broadcast medium — every node hears every frame and
+    // filters by identifier. Declaring UNICAST instead routes the listen side
+    // through _zp_unicast_accept_task, which needs a socket and an accept()
+    // that no datagram medium has, and the handshake never completes.
+    zl->_cap._transport = Z_LINK_CAP_TRANSPORT_MULTICAST;
     // CAN frames are bounded and self-delimiting, which is exactly what a
     // datagram link is. Declaring STREAM instead would oblige this link to
     // build segmentation and reassembly internally, and zenoh would then
