@@ -37,8 +37,8 @@
 #include "zenoh-pico/system/link/can.h"
 
 #define CAN_DEV (getenv("ZP_CAN_DEV") != NULL ? getenv("ZP_CAN_DEV") : "vcan0")
-#define TX_ID 0x100u
-#define RX_ID 0x101u
+#define ID_A 0x100u
+#define ID_B 0x101u
 
 #include <stdlib.h>
 
@@ -68,9 +68,22 @@ static void roundtrip(_z_can_socket_t *a, _z_can_socket_t *b, size_t len, const 
     }
 
     memset(in, 0, sizeof(in));
-    size_t rb = _z_read_can(b, in, sizeof(in));
+    uint8_t addrbuf[32] = {0};
+    _z_slice_t addr = _z_slice_alias_buf(addrbuf, sizeof(addrbuf));
+    size_t rb = _z_read_can(b, in, sizeof(in), &addr);
     if (rb != len) {
         printf("  %-56s FAILED (read returned %zu, expected %zu)\n", label, rb, len);
+        failures++;
+        return;
+    }
+
+    // The sender identifier must come back through `addr` — that is how the
+    // multicast transport tells peers apart.
+    uint32_t reported = (uint32_t)addrbuf[0] | ((uint32_t)addrbuf[1] << 8) | ((uint32_t)addrbuf[2] << 16) |
+                        ((uint32_t)addrbuf[3] << 24);
+    if ((addr.len != _Z_CAN_ADDR_SIZE) || (reported != a->_id)) {
+        printf("  %-56s FAILED (addr len %zu, sender 0x%x, expected 0x%x)\n", label, addr.len, (unsigned)reported,
+               (unsigned)a->_id);
         failures++;
         return;
     }
@@ -95,11 +108,13 @@ int main(void) {
     memset(&a, 0, sizeof(a));
     memset(&b, 0, sizeof(b));
 
-    if (_z_open_can(&a, dev, 500000u, 2000000u, TX_ID, RX_ID) != _Z_RES_OK) {
+    // Two peers on one bus: A transmits on ID_A, B on ID_B, both accept
+    // everything (mask 0) and drop their own frames.
+    if (_z_open_can(&a, dev, 500000u, 2000000u, ID_A, 0u, 0u) != _Z_RES_OK) {
         printf("  open A FAILED\n");
         return 1;
     }
-    if (_z_listen_can(&b, dev, 500000u, 2000000u, RX_ID, TX_ID) != _Z_RES_OK) {
+    if (_z_listen_can(&b, dev, 500000u, 2000000u, ID_B, 0u, 0u) != _Z_RES_OK) {
         printf("  listen B FAILED\n");
         _z_close_can(&a);
         return 1;
@@ -122,7 +137,7 @@ int main(void) {
         roundtrip(&a, &b, _Z_CAN_FD_MTU_SIZE, "63 bytes (CAN FD MTU)");
     }
 
-    // Both directions — the identifier swap in listen() must actually work.
+    // Both directions, and the reported sender must flip with them.
     roundtrip(&b, &a, 16, "reverse direction, 16 bytes");
 
     // Over-MTU writes must be refused, not truncated. zenoh's transport should
