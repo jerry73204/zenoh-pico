@@ -43,8 +43,22 @@ extern "C" {
 // bus with ordinary vehicle traffic by claiming an identifier band rather than
 // the whole bus.
 //
-// Identifier value IS bus priority on CAN — a lower identifier wins
-// arbitration — so the choice is a real-time decision, not a free one.
+// Identifier value IS bus priority on CAN — a LOWER identifier wins arbitration
+// — so `id` is a real-time decision, not a name.
+//
+// The peer that must not be delayed needs the lower identifier. On a safety
+// island that is the node publishing the stop command, NOT the one publishing
+// bulk telemetry: if the telemetry peer holds the lower id, its multi-frame
+// bursts outrank every urgent message on the bus.
+//
+// The defaults below are a STARTING POINT, not an allocation. Two peers that
+// both accept them differ only by whoever was configured first, which is a
+// priority ordering nobody chose. Allocate them deliberately.
+//
+// Note also that priority here is per PEER, not per message: one identifier
+// carries all of a peer's traffic, and zenoh-pico batches a link FIFO with no
+// per-priority split, so a peer's own urgent message cannot overtake its own
+// bulk one. See RFC-0080 section 4.2.
 
 #define CAN_CONFIG_ARGC 5
 
