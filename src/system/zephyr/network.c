@@ -996,7 +996,7 @@ size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, c
 K_MSGQ_DEFINE(_z_can_rx_msgq, sizeof(struct can_frame), Z_CAN_RX_QUEUE_DEPTH, 4);
 
 static z_result_t __z_can_setup(_z_can_socket_t *sock, const char *dev_name, uint32_t bitrate, uint32_t dbitrate,
-                                uint32_t tx_id, uint32_t rx_id) {
+                                uint32_t id, uint32_t match, uint32_t mask) {
     const struct device *dev = device_get_binding(dev_name);
     if (dev == NULL) {
         _Z_ERROR("CAN: no device '%s'", dev_name);
@@ -1033,13 +1033,15 @@ static z_result_t __z_can_setup(_z_can_socket_t *sock, const char *dev_name, uin
         (void)can_set_bitrate_data(dev, dbitrate);
     }
 
+    // Admit the whole zenoh band; the read drops our own frames. A mask of 0
+    // matches every identifier, which is the default for a dedicated bus.
     const struct can_filter filter = {
-        .id = rx_id,
-        .mask = CAN_STD_ID_MASK,
+        .id = match,
+        .mask = mask,
         .flags = 0,
     };
     if (can_add_rx_filter_msgq(dev, &_z_can_rx_msgq, &filter) < 0) {
-        _Z_ERROR("CAN: could not add rx filter for id 0x%x", (unsigned)rx_id);
+        _Z_ERROR("CAN: could not add rx filter (match 0x%x mask 0x%x)", (unsigned)match, (unsigned)mask);
         return _Z_ERR_GENERIC;
     }
 
@@ -1049,22 +1051,23 @@ static z_result_t __z_can_setup(_z_can_socket_t *sock, const char *dev_name, uin
     }
 
     sock->_sock._can_dev = dev;
-    sock->_tx_id = tx_id;
-    sock->_rx_id = rx_id;
+    sock->_id = id;
+    sock->_match = match;
+    sock->_mask = mask;
     sock->_fd_mode = fd_mode;
     sock->_mtu = fd_mode ? _Z_CAN_FD_MTU_SIZE : _Z_CAN_CLASSIC_MTU_SIZE;
     return _Z_RES_OK;
 }
 
-z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t tx_id,
-                       uint32_t rx_id) {
-    return __z_can_setup(sock, dev, bitrate, dbitrate, tx_id, rx_id);
+z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
+                       uint32_t match, uint32_t mask) {
+    return __z_can_setup(sock, dev, bitrate, dbitrate, id, match, mask);
 }
 
-z_result_t _z_listen_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t tx_id,
-                         uint32_t rx_id) {
-    // CAN has no connection setup — the caller already swapped identifiers.
-    return __z_can_setup(sock, dev, bitrate, dbitrate, tx_id, rx_id);
+z_result_t _z_listen_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
+                         uint32_t match, uint32_t mask) {
+    // Multicast peers all listen; a bus has no connection setup.
+    return __z_can_setup(sock, dev, bitrate, dbitrate, id, match, mask);
 }
 
 void _z_close_can(_z_can_socket_t *sock) {
@@ -1082,7 +1085,7 @@ size_t _z_send_can(const _z_can_socket_t *sock, const uint8_t *ptr, size_t len) 
 
     struct can_frame frame;
     memset(&frame, 0, sizeof(frame));
-    frame.id = sock->_tx_id;
+    frame.id = sock->_id;
     // Byte 0 is the true length; the DLC may describe a longer frame because
     // CAN FD lengths are quantised (system/link/can.h).
     frame.data[0] = (uint8_t)len;
@@ -1100,15 +1103,22 @@ size_t _z_send_can(const _z_can_socket_t *sock, const uint8_t *ptr, size_t len) 
     return len;
 }
 
-size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len) {
+size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_slice_t *addr) {
     struct can_frame frame;
 
+    // Loop until a frame arrives that is not ours, mirroring
+    // `_z_read_udp_multicast`: on a bus every peer hears everything.
     for (;;) {
         if (k_msgq_get(&_z_can_rx_msgq, &frame, K_FOREVER) != 0) {
             return SIZE_MAX;
         }
-        if ((frame.id & CAN_STD_ID_MASK) != (sock->_rx_id & CAN_STD_ID_MASK)) {
-            continue;
+
+        uint32_t sender = frame.id & CAN_EXT_ID_MASK;
+        if (sender == sock->_id) {
+            continue;  // our own frame
+        }
+        if ((sock->_mask != 0u) && ((sender & sock->_mask) != sock->_match)) {
+            continue;  // outside the zenoh band
         }
 
         uint8_t frame_len = can_dlc_to_bytes(frame.dlc);
@@ -1123,6 +1133,16 @@ size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len) {
             _Z_ERROR("CAN: bad datagram length %zu (frame %u, buffer %zu)", dlen, (unsigned)frame_len, len);
             continue;
         }
+
+        if (addr != NULL) {
+            addr->len = _Z_CAN_ADDR_SIZE;
+            uint8_t *dst = (uint8_t *)addr->start;
+            dst[0] = (uint8_t)(sender & 0xFFu);
+            dst[1] = (uint8_t)((sender >> 8) & 0xFFu);
+            dst[2] = (uint8_t)((sender >> 16) & 0xFFu);
+            dst[3] = (uint8_t)((sender >> 24) & 0xFFu);
+        }
+
         if (dlen > 0) {
             memcpy(ptr, &frame.data[1], dlen);
         }

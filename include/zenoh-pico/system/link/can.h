@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 
+#include "zenoh-pico/collections/slice.h"
 #include "zenoh-pico/config.h"
 #include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/utils/result.h"
@@ -48,13 +49,30 @@ extern "C" {
 // so the link never sees a write it cannot place in one frame.
 #define _Z_CAN_MTU_SIZE _Z_CAN_FD_MTU_SIZE
 
+// A CAN bus is a broadcast medium: every node hears every frame and filters by
+// identifier. That is a MULTICAST link, not a unicast one, and modelling it as
+// unicast is what the first revision of RFC-0080 got wrong — zenoh's unicast
+// listen path goes through `_zp_unicast_accept_task`, which needs a socket and
+// an accept() that no datagram medium has.
+//
+// So each peer owns one identifier, transmits on it, and accepts frames from
+// every other identifier the mask admits. The sender's identifier is that
+// peer's address, which is what the multicast transport compares in
+// `_remote_addr` to tell peers apart. UDP multicast is the reference: its read
+// loops until it sees a datagram that is not its own, then reports the sender.
 typedef struct {
     _z_sys_net_socket_t _sock;
-    uint32_t _tx_id;
-    uint32_t _rx_id;
-    uint16_t _mtu;  // _Z_CAN_FD_MTU_SIZE or _Z_CAN_CLASSIC_MTU_SIZE
+    uint32_t _id;    // this peer's identifier — its address on the bus
+    uint32_t _match; // accept frames whose (id & _mask) == _match
+    uint32_t _mask;  // 0 accepts every identifier
+    uint16_t _mtu;   // _Z_CAN_FD_MTU_SIZE or _Z_CAN_CLASSIC_MTU_SIZE
     _Bool _fd_mode;
 } _z_can_socket_t;
+
+// The sender identifier reported through the `addr` slice. The multicast
+// transport gives the link a 32-byte buffer (_Z_MULTICAST_ADDR_BUFF_SIZE), so
+// four bytes is comfortable.
+#define _Z_CAN_ADDR_SIZE 4u
 
 /**
  * Open a CAN link.
@@ -66,20 +84,26 @@ typedef struct {
  * on a rate it cannot apply, and must report the mode it actually got in
  * `sock->_fd_mode`.
  */
-z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t tx_id,
-                       uint32_t rx_id);
+z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
+                       uint32_t match, uint32_t mask);
 
-/** Listen side. CAN is a bus with no connection setup, so this differs from
- *  `_z_open_can` only in which identifier is used for which direction. */
-z_result_t _z_listen_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t tx_id,
-                         uint32_t rx_id);
+/** Listen side. A CAN bus has no connection setup and multicast peers all
+ *  listen, so this is identical to `_z_open_can`; both exist because the link
+ *  table wants both callbacks. */
+z_result_t _z_listen_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
+                         uint32_t match, uint32_t mask);
 
 void _z_close_can(_z_can_socket_t *sock);
 
-/** Read one datagram. Returns its length, or `SIZE_MAX` on error. Frames whose
- *  identifier is not `_rx_id` are skipped, so a shared bus does not deliver
- *  foreign traffic into the transport. */
-size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len);
+/** Read one datagram and report who sent it.
+ *
+ * Skips this peer's own frames and any whose identifier the mask excludes, so a
+ * shared bus does not deliver foreign traffic into the transport. When `addr`
+ * is non-NULL the sender's identifier is written to it as `_Z_CAN_ADDR_SIZE`
+ * little-endian bytes; the multicast transport uses that to tell peers apart.
+ *
+ * Returns the datagram length, or `SIZE_MAX` on error. */
+size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_slice_t *addr);
 
 /** Write one datagram, which must be <= the socket's MTU. Returns the number
  *  of bytes written, or `SIZE_MAX` on error. */
