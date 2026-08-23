@@ -89,6 +89,10 @@
 #ifndef Z_FEATURE_LINK_IVC
 #define Z_FEATURE_LINK_IVC 0
 #endif
+/* RFC-0080 — CAN / CAN FD link transport. */
+#ifndef Z_FEATURE_LINK_CAN
+#define Z_FEATURE_LINK_CAN 0
+#endif
 #ifndef Z_FEATURE_LINK_TLS
 #define Z_FEATURE_LINK_TLS 0
 #endif

@@ -53,6 +53,9 @@ typedef struct {
 #if Z_FEATURE_LINK_SERIAL == 1
         const struct device *_serial;
 #endif
+#if Z_FEATURE_LINK_CAN == 1
+        const struct device *_can_dev;
+#endif
     };
 } _z_sys_net_socket_t;
 

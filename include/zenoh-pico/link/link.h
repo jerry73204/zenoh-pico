@@ -46,6 +46,10 @@
 #include "zenoh-pico/system/link/ivc.h"
 #endif
 
+#if Z_FEATURE_LINK_CAN == 1
+#include "zenoh-pico/system/link/can.h"
+#endif
+
 #if Z_FEATURE_LINK_WS == 1
 #include "zenoh-pico/system/link/ws.h"
 #endif
@@ -136,6 +140,7 @@ enum _z_link_type_e {
     _Z_LINK_TYPE_TLS,
     _Z_LINK_TYPE_RAWETH,
     _Z_LINK_TYPE_IVC,     // Phase 100.4 — NVIDIA Tegra IVC
+    _Z_LINK_TYPE_CAN,     // RFC-0080 — CAN / CAN FD
     _Z_LINK_TYPE_CUSTOM,  // nros: Phase 115.B — runtime-pluggable user transport
 };
 
@@ -157,6 +162,9 @@ typedef struct _z_link_t {
 #endif
 #if Z_FEATURE_LINK_IVC == 1
         _z_ivc_socket_t _ivc;
+#endif
+#if Z_FEATURE_LINK_CAN == 1
+        _z_can_socket_t _can;
 #endif
 #if Z_FEATURE_LINK_WS == 1
         _z_ws_socket_t _ws;
