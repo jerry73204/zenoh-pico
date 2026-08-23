@@ -47,6 +47,10 @@ extern "C" {
 #if Z_FEATURE_LINK_TLS == 1
 #define TLS_SCHEMA "tls"
 #endif
+#if Z_FEATURE_LINK_CAN == 1
+// RFC-0080 — CAN / CAN FD.
+#define CAN_SCHEMA "can"
+#endif
 #if Z_FEATURE_LINK_CUSTOM == 1
 // nros: Phase 115.B — runtime-pluggable user transport.
 #define CUSTOM_SCHEMA "custom"

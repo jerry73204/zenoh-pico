@@ -75,6 +75,11 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
             ret = _z_new_link_ivc(zl, ep);
         } else
 #endif
+#if Z_FEATURE_LINK_CAN == 1
+            if (_z_endpoint_can_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_can(zl, ep);
+        } else
+#endif
 #if Z_FEATURE_LINK_WS == 1
             if (_z_endpoint_ws_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_ws(zl, &ep);
@@ -144,6 +149,11 @@ z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_co
 #if Z_FEATURE_LINK_IVC == 1
             if (_z_endpoint_ivc_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_ivc(zl, ep);
+        } else
+#endif
+#if Z_FEATURE_LINK_CAN == 1
+            if (_z_endpoint_can_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_can(zl, ep);
         } else
 #endif
             if (_z_endpoint_raweth_valid(&ep) == _Z_RES_OK) {
@@ -270,6 +280,14 @@ const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link) {
 #if Z_FEATURE_LINK_SERIAL == 1
         case _Z_LINK_TYPE_SERIAL:
             return &link->_socket._serial._sock;
+#endif
+#if Z_FEATURE_LINK_CAN == 1
+        case _Z_LINK_TYPE_CAN:
+            // The CAN read must filter on the receive identifier, which a bare
+            // socket read cannot do, so this link dispatches through its own
+            // callbacks. Same contract as IVC below: NULL means "no FD to wait
+            // on".
+            return NULL;
 #endif
 #if Z_FEATURE_LINK_IVC == 1
         case _Z_LINK_TYPE_IVC:
