@@ -961,6 +961,12 @@ z_result_t _z_listen_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint3
 
 void _z_close_serial(_z_sys_net_socket_t *sock) {}
 
+/* Per-byte read timeout. Long enough for a peer to answer a handshake, short
+   enough that a lost frame is recoverable rather than a permanent hang. */
+#ifndef _Z_ZEPHYR_SERIAL_TIMEOUT_MS
+#define _Z_ZEPHYR_SERIAL_TIMEOUT_MS 1000
+#endif
+
 size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len) {
     uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
     if (raw_buf == NULL) {
@@ -970,15 +976,22 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
     size_t rb = 0;
     for (size_t i = 0; i < _Z_SERIAL_MAX_COBS_BUF_SIZE; i++) {
         int res = -1;
+        /* Bounded per-byte wait, as the flipper port does with a 200 ms
+           furi_stream_buffer_receive() and the unix port with SO_RCVTIMEO: on
+           expiry return SIZE_MAX, which is the contract callers already handle
+           (_z_read_exact_serial breaks on it). Unbounded was the real defect --
+           _z_connect_serial sends one INIT and then blocks here forever, so a
+           lost INIT could never be retried and the link was unrecoverable.
+           Yield rather than sleep between polls: at 115200 a byte is 87 us and
+           the shortest z_sleep_ms(1) blocks a whole tick, overrunning the UART. */
+        int64_t deadline = k_uptime_get() + (int64_t)_Z_ZEPHYR_SERIAL_TIMEOUT_MS;
         while (res != 0) {
             res = uart_poll_in(sock._serial, &raw_buf[i]);
             if (res != 0) {
-                /* Reschedule without sleeping. The spin must not starve other
-                   threads, but it must not oversleep either: at 115200 a byte is
-                   87 us, while the shortest z_sleep_ms(1) blocks a whole 1 ms
-                   tick -- over eleven byte-times -- and the UART overruns, so
-                   frames never assemble. k_yield() gives up the CPU to any ready
-                   thread and returns immediately when there is none. */
+                if (k_uptime_get() > deadline) {
+                    z_free(raw_buf);
+                    return SIZE_MAX;
+                }
                 k_yield();
             }
         }
