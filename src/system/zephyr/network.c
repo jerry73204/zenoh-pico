@@ -21,10 +21,14 @@
 #endif
 
 #include <fcntl.h>
+#if defined(CONFIG_NET_SOCKETS)
 #include <netdb.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
+#if defined(CONFIG_NET_SOCKETS)
 #include <sys/socket.h>
+#endif
 #include <unistd.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/posix/sys/select.h>
@@ -38,6 +42,8 @@
 #include <zephyr/kernel.h>
 #endif
 #include "zenoh-pico/config.h"
+#include "zenoh-pico/protocol/codec/serial.h"
+#include "zenoh-pico/system/common/serial.h"
 #include "zenoh-pico/system/link/serial.h"
 #include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/transport/transport.h"
@@ -45,6 +51,16 @@
 #include "zenoh-pico/utils/encoding.h"
 #include "zenoh-pico/utils/logging.h"
 #include "zenoh-pico/utils/pointers.h"
+
+/* Socket-backed helpers. Guarded because a serial-only build has no IP stack:
+ * these use fcntl/accept/sockaddr/socklen_t and the `_fd` member, none of which
+ * exist when every socket link is off. Zephyr's port compiled them
+ * unconditionally, so `serial` alone did not build. */
+#define _Z_ZEPHYR_HAS_SOCKET_LINK                                                  \
+    ((Z_FEATURE_LINK_TCP == 1) || (Z_FEATURE_LINK_UDP_UNICAST == 1) ||             \
+     (Z_FEATURE_LINK_UDP_MULTICAST == 1) || (Z_FEATURE_LINK_WS == 1))
+
+#if _Z_ZEPHYR_HAS_SOCKET_LINK
 
 z_result_t _z_socket_set_non_blocking(const _z_sys_net_socket_t *sock) {
     int flags = fcntl(sock->_fd, F_GETFL, 0);
@@ -140,6 +156,33 @@ z_result_t _z_socket_wait_event(void *peers, _z_mutex_rec_t *mutex) {
     return _Z_RES_OK;
 }
 #endif
+
+#else /* !_Z_ZEPHYR_HAS_SOCKET_LINK */
+
+/* zenoh-pico's transport layer references these unconditionally, so a
+ * serial-only build still needs the symbols. Nothing can reach them without a
+ * socket link -- there is no socket to accept, close or wait on -- so they fail
+ * rather than pretend to succeed. */
+z_result_t _z_socket_set_non_blocking(const _z_sys_net_socket_t *sock) {
+    (void)sock;
+    return _Z_ERR_GENERIC;
+}
+
+z_result_t _z_socket_accept(const _z_sys_net_socket_t *sock_in, _z_sys_net_socket_t *sock_out) {
+    (void)sock_in;
+    (void)sock_out;
+    return _Z_ERR_GENERIC;
+}
+
+void _z_socket_close(_z_sys_net_socket_t *sock) { (void)sock; }
+
+z_result_t _z_socket_wait_event(void *v_peers, _z_mutex_rec_t *mutex) {
+    (void)v_peers;
+    (void)mutex;
+    return _Z_ERR_GENERIC;
+}
+
+#endif /* _Z_ZEPHYR_HAS_SOCKET_LINK */
 
 #if Z_FEATURE_LINK_TCP == 1
 /*------------------ TCP sockets ------------------*/
@@ -868,6 +911,7 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
 size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, const uint8_t *ptr, size_t len) {
     uint8_t *tmp_buf = (uint8_t *)z_malloc(_Z_SERIAL_MFS_SIZE);
     uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
+
     if ((raw_buf == NULL) || (tmp_buf == NULL)) {
         _Z_ERROR("Failed to allocate serial COBS and/or MFS buffer");
         return SIZE_MAX;
