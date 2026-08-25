@@ -838,12 +838,6 @@ z_result_t _z_open_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint32_
         if (uart_configure(sock->_serial, &config) != 0) {
             _Z_ERROR_LOG(_Z_ERR_GENERIC);
             ret = _Z_ERR_GENERIC;
-        } else {
-            /* Settle AFTER configuring. The first frame otherwise goes out
-               microseconds after both an MCU reset and a uart_configure(), and
-               the peer discards it -- measured: a single 9-byte frame never
-               arrives, 200 back-to-back frames do. */
-            z_sleep_ms(1000);
         }
     } else {
         _Z_ERROR_LOG(_Z_ERR_GENERIC);
@@ -894,9 +888,13 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
         while (res != 0) {
             res = uart_poll_in(sock._serial, &raw_buf[i]);
             if (res != 0) {
-                /* Yield. This was a tight spin at thread priority, which starves
-                   every other thread on the core while waiting for a byte. */
-                z_sleep_ms(1);
+                /* Reschedule without sleeping. The spin must not starve other
+                   threads, but it must not oversleep either: at 115200 a byte is
+                   87 us, while the shortest z_sleep_ms(1) blocks a whole 1 ms
+                   tick -- over eleven byte-times -- and the UART overruns, so
+                   frames never assemble. k_yield() gives up the CPU to any ready
+                   thread and returns immediately when there is none. */
+                k_yield();
             }
         }
 
