@@ -920,6 +920,7 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
     uint8_t *tmp_buf = (uint8_t *)z_malloc(_Z_SERIAL_MFS_SIZE);
     if (tmp_buf == NULL) {
         _Z_ERROR("Failed to allocate serial MFS buffer");
+        z_free(raw_buf);
         return SIZE_MAX;
     }
     size_t ret = _z_serial_msg_deserialize(raw_buf, rb, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
@@ -936,12 +937,18 @@ size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, c
 
     if ((raw_buf == NULL) || (tmp_buf == NULL)) {
         _Z_ERROR("Failed to allocate serial COBS and/or MFS buffer");
+        z_free(raw_buf);
+        z_free(tmp_buf);
         return SIZE_MAX;
     }
     size_t ret =
         _z_serial_msg_serialize(raw_buf, _Z_SERIAL_MAX_COBS_BUF_SIZE, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
 
     if (ret == SIZE_MAX) {
+        /* Both buffers leaked here: ~3 KiB per failed send, and a link that is
+           retrying a handshake fails repeatedly. */
+        z_free(raw_buf);
+        z_free(tmp_buf);
         return ret;
     }
 
