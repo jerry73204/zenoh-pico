@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <stddef.h>
+#include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -70,22 +71,131 @@ void z_free(void *ptr) { k_free(ptr); }
 #endif
 
 K_THREAD_STACK_ARRAY_DEFINE(thread_stack_area, Z_THREADS_NUM, Z_PTHREAD_STACK_SIZE_DEFAULT);
-static int thread_index = 0;
+
+/* Stack slots are CLAIMED and RELEASED, not handed out by an ever-rising
+ * counter. The counter this replaces (`static int thread_index = 0`, indexed as
+ * `thread_stack_area[thread_index++]`) was never reset and never bounds
+ * checked, so the FIFTH task an image ever created got a stack pointer one
+ * whole stack past the end of the array, and every task after that reached
+ * further into whatever .bss followed. Nothing reported it: the threads simply
+ * ran with their stacks overlapping live data.
+ *
+ * Four slots is plenty for a steady session (one read task + one lease task),
+ * which is why this went unnoticed. It is a RECONNECT that spends them: each
+ * re-open creates two more, so the second reconnect is already out of bounds.
+ * Observed on mr_canhubk3/s32k344 as a fatal at ~1m51s with pc=0x00000000 and
+ * a fatal-reason argument of 35, which is not a Zephyr reason code -- the
+ * classic shape of a corrupted stack frame rather than a clean fault.
+ *
+ * RELEASE IS ON JOIN, NOT ON FREE, and that distinction is load-bearing.
+ * `_z_transport_clear` DETACHES both tasks when tearing down from inside one
+ * of them (`detach_tasks == true`, which is the lease-expiry path) and then
+ * calls `_z_task_free`. A detached thread may still be running at that moment,
+ * so releasing its slot there would hand a live thread's stack to the next
+ * task -- a worse bug than the one being fixed. `pthread_join` returning is
+ * proof the thread is gone, so only that path releases.
+ *
+ * Consequence, stated plainly: a detach-teardown still retires its slot for
+ * the life of the image. An image that reconnects repeatedly therefore runs
+ * out and `_z_task_init` starts failing -- cleanly, with
+ * _Z_ERR_SYSTEM_TASK_FAILED, instead of corrupting memory. Fixing that
+ * properly needs a thread-exit hook this API does not have. */
+static struct {
+    pthread_t owner;
+    bool in_use;
+} thread_slots[Z_THREADS_NUM];
+static K_MUTEX_DEFINE(thread_slots_lock);
+
+static int _z_claim_stack_slot(void) {
+    int slot = -1;
+    (void)k_mutex_lock(&thread_slots_lock, K_FOREVER);
+    for (int i = 0; i < Z_THREADS_NUM; i++) {
+        if (!thread_slots[i].in_use) {
+            thread_slots[i].in_use = true;
+            /* Clear the previous occupant's tid before releasing the lock.
+             * `_z_release_stack_slot_of` matches on owner, and a claimed slot
+             * whose owner still names a DEAD thread could be matched -- and
+             * freed -- by a concurrent join of some other task that happened
+             * to be handed the same tid value. Between claim and
+             * `_z_record_stack_owner` the slot is in_use and owned by nobody,
+             * which is exactly right: reserved, unmatchable. */
+            (void)memset(&thread_slots[i].owner, 0, sizeof(thread_slots[i].owner));
+            slot = i;
+            break;
+        }
+    }
+    (void)k_mutex_unlock(&thread_slots_lock);
+    return slot;
+}
+
+static void _z_record_stack_owner(int slot, pthread_t owner) {
+    (void)k_mutex_lock(&thread_slots_lock, K_FOREVER);
+    thread_slots[slot].owner = owner;
+    (void)k_mutex_unlock(&thread_slots_lock);
+}
+
+static void _z_release_stack_slot(int slot) {
+    (void)k_mutex_lock(&thread_slots_lock, K_FOREVER);
+    thread_slots[slot].in_use = false;
+    (void)k_mutex_unlock(&thread_slots_lock);
+}
+
+static void _z_release_stack_slot_of(pthread_t owner) {
+    (void)k_mutex_lock(&thread_slots_lock, K_FOREVER);
+    for (int i = 0; i < Z_THREADS_NUM; i++) {
+        pthread_t none;
+        (void)memset(&none, 0, sizeof(none));
+        if (thread_slots[i].in_use && (pthread_equal(thread_slots[i].owner, none) == 0) &&
+            (pthread_equal(thread_slots[i].owner, owner) != 0)) {
+            thread_slots[i].in_use = false;
+            break;
+        }
+    }
+    (void)k_mutex_unlock(&thread_slots_lock);
+}
 
 /*------------------ Task ------------------*/
 z_result_t _z_task_init(_z_task_t *task, z_task_attr_t *attr, void *(*fun)(void *), void *arg) {
     z_task_attr_t *lattr = NULL;
     z_task_attr_t tmp;
+    int slot = -1;
     if (attr == NULL) {
+        slot = _z_claim_stack_slot();
+        if (slot < 0) {
+            /* Out of stack slots. Refusing is the whole point: the previous
+             * code indexed past the array here and corrupted whatever .bss
+             * followed it. */
+            _Z_ERROR("no free zenoh-pico thread stack slot (Z_THREADS_NUM=%d)", Z_THREADS_NUM);
+            return _Z_ERR_SYSTEM_TASK_FAILED;
+        }
         (void)pthread_attr_init(&tmp);
-        (void)pthread_attr_setstack(&tmp, &thread_stack_area[thread_index++], Z_PTHREAD_STACK_SIZE_DEFAULT);
+        (void)pthread_attr_setstack(&tmp, &thread_stack_area[slot], Z_PTHREAD_STACK_SIZE_DEFAULT);
         lattr = &tmp;
     }
 
-    _Z_CHECK_SYS_ERR(pthread_create(task, lattr, fun, arg));
+    int rc = pthread_create(task, lattr, fun, arg);
+    if (rc != 0) {
+        if (slot >= 0) {
+            _z_release_stack_slot(slot);
+        }
+        return _Z_ERR_SYSTEM_TASK_FAILED;
+    }
+    if (slot >= 0) {
+        _z_record_stack_owner(slot, *task);
+    }
+    return _Z_RES_OK;
 }
 
-z_result_t _z_task_join(_z_task_t *task) { _Z_CHECK_SYS_ERR(pthread_join(*task, NULL)); }
+z_result_t _z_task_join(_z_task_t *task) {
+    int rc = pthread_join(*task, NULL);
+    if (rc != 0) {
+        return _Z_ERR_SYSTEM_TASK_FAILED;
+    }
+    /* The thread is provably gone, so its stack can be handed out again. This
+     * is the ONLY safe point to release: see the note above the slot table. */
+    _z_release_stack_slot_of(*task);
+    return _Z_RES_OK;
+}
 
 z_result_t _z_task_detach(_z_task_t *task) { _Z_CHECK_SYS_ERR(pthread_detach(*task)); }
 
