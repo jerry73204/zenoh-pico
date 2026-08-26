@@ -26,8 +26,18 @@
 #define Z_BATCH_UNICAST_SIZE @BATCH_UNICAST_SIZE@
 #define Z_BATCH_MULTICAST_SIZE @BATCH_MULTICAST_SIZE@
 #define Z_CONFIG_SOCKET_TIMEOUT @Z_CONFIG_SOCKET_TIMEOUT@
+/* Guarded so an embedding build can set these with a -D. The lease is BOTH the
+ * keepalive cadence (lease / EXPIRE_FACTOR) and the peer-silence tolerance,
+ * and a peer is dropped after two lease periods with nothing received.
+ * Against a router that does not send keepalives on the link, a pure
+ * publisher hears nothing back and closes at 2 x Z_TRANSPORT_LEASE regardless
+ * of how healthy the link is. */
+#ifndef Z_TRANSPORT_LEASE
 #define Z_TRANSPORT_LEASE @Z_TRANSPORT_LEASE@
+#endif
+#ifndef Z_TRANSPORT_LEASE_EXPIRE_FACTOR
 #define Z_TRANSPORT_LEASE_EXPIRE_FACTOR @Z_TRANSPORT_LEASE_EXPIRE_FACTOR@
+#endif
 #define Z_RUNTIME_MAX_TASKS @Z_RUNTIME_MAX_TASKS@
 #define Z_RUNTIME_IDLE_READ_TASK_SLEEP @Z_RUNTIME_IDLE_READ_TASK_SLEEP@
 #define Z_TRANSPORT_ACCEPT_TIMEOUT @Z_TRANSPORT_ACCEPT_TIMEOUT@
