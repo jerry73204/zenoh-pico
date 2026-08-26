@@ -36,8 +36,25 @@
 #define Z_CONFIG_SOCKET_TIMEOUT 100
 #endif
 #endif
+/* Guarded so an embedding build can set these without editing a generated
+ * header. Upstream exposes both as CMake cache variables, which only works if
+ * you run zenoh-pico's own CMakeLists; a build that compiles these sources
+ * directly (the Zephyr module does) gets this checked-in config.h and had no
+ * way in at all -- a command-line -D collided with the unconditional #define
+ * and lost. Same treatment Z_CONFIG_SOCKET_TIMEOUT already has above.
+ *
+ * These matter on a serial link. The lease is BOTH the keepalive cadence
+ * (lease / EXPIRE_FACTOR) and the peer-silence tolerance, and a peer is
+ * dropped after two lease periods with nothing received. Against a router
+ * that does not send keepalives on the link, a pure publisher hears nothing
+ * back and closes at 2 x Z_TRANSPORT_LEASE regardless of how healthy the
+ * link is. */
+#ifndef Z_TRANSPORT_LEASE
 #define Z_TRANSPORT_LEASE 10000
+#endif
+#ifndef Z_TRANSPORT_LEASE_EXPIRE_FACTOR
 #define Z_TRANSPORT_LEASE_EXPIRE_FACTOR 3
+#endif
 #define ZP_PERIODIC_SCHEDULER_MAX_TASKS 64
 
 /* #undef Z_FEATURE_UNSTABLE_API */
