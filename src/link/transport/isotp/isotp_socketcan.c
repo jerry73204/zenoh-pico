@@ -15,7 +15,10 @@
 #include "zenoh-pico/link/transport/isotp.h"
 
 // Same ordering rule as SocketCAN: needs Z_FEATURE_LINK_ISOTP defined.
-#if defined(ZENOH_LINUX) && Z_FEATURE_LINK_ISOTP == 1
+// Z_FEATURE_LINK_ISOTP_VENDORED selects isotp_vendored_linux.c instead of
+// everything below -- see the comment at the top of that file for why `unix`
+// implements this link twice.
+#if defined(ZENOH_LINUX) && Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
 
 #include <errno.h>
 #include <linux/can.h>
@@ -28,7 +31,7 @@
 
 #include "zenoh-pico/utils/logging.h"
 
-#if Z_FEATURE_LINK_ISOTP == 1
+#if Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
 
 // The kernel does ISO-TP for us: segmentation, flow control and the N_As/N_Bs/
 // N_Cr timers all live in `net/can/isotp.c`, and a read returns one whole
@@ -131,5 +134,5 @@ size_t _z_send_isotp(const _z_isotp_socket_t *sock, const uint8_t *ptr, size_t l
     return (size_t)wb;
 }
 
-#endif  // Z_FEATURE_LINK_ISOTP == 1
-#endif  // defined(ZENOH_LINUX) && Z_FEATURE_LINK_ISOTP == 1
+#endif  // Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
+#endif  // defined(ZENOH_LINUX) && Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
