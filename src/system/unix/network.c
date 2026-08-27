@@ -43,7 +43,10 @@
 #include <sys/socket.h>
 #endif
 // Same ordering rule as SocketCAN above: needs Z_FEATURE_LINK_ISOTP defined.
-#if Z_FEATURE_LINK_ISOTP == 1
+// Z_FEATURE_LINK_ISOTP_VENDORED selects src/system/unix/isotp_vendored.c
+// instead of everything below -- see the comment at the top of that file for
+// why `unix` implements this link twice.
+#if Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
 #include <linux/can.h>
 #include <linux/can/isotp.h>
 #include <sys/socket.h>
@@ -1299,7 +1302,7 @@ size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_sli
 
 #endif  // Z_FEATURE_LINK_CAN == 1
 
-#if Z_FEATURE_LINK_ISOTP == 1
+#if Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
 
 // The kernel does ISO-TP for us: segmentation, flow control and the N_As/N_Bs/
 // N_Cr timers all live in `net/can/isotp.c`, and a read returns one whole
@@ -1402,4 +1405,4 @@ size_t _z_send_isotp(const _z_isotp_socket_t *sock, const uint8_t *ptr, size_t l
     return (size_t)wb;
 }
 
-#endif  // Z_FEATURE_LINK_ISOTP == 1
+#endif  // Z_FEATURE_LINK_ISOTP == 1 && Z_FEATURE_LINK_ISOTP_VENDORED == 0
