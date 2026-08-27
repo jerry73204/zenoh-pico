@@ -51,6 +51,10 @@ extern "C" {
 // RFC-0080 — CAN / CAN FD.
 #define CAN_SCHEMA "can"
 #endif
+#if Z_FEATURE_LINK_ISOTP == 1
+// RFC-0083 — CAN unicast over ISO-TP.
+#define ISOTP_SCHEMA "isotp"
+#endif
 #if Z_FEATURE_LINK_CUSTOM == 1
 // nros: Phase 115.B — runtime-pluggable user transport.
 #define CUSTOM_SCHEMA "custom"

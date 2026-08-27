@@ -38,6 +38,9 @@
 #if Z_FEATURE_LINK_CAN == 1
 #include "zenoh-pico/link/transport/can.h"
 #endif
+#if Z_FEATURE_LINK_ISOTP == 1
+#include "zenoh-pico/link/transport/isotp.h"
+#endif
 
 #if Z_FEATURE_LINK_TLS == 1
 #include "zenoh-pico/link/transport/tls_stream.h"
@@ -126,6 +129,7 @@ enum _z_link_type_e {
     _Z_LINK_TYPE_RAWETH,
     _Z_LINK_TYPE_IVC,     // Phase 100.4 — NVIDIA Tegra IVC
     _Z_LINK_TYPE_CAN,     // RFC-0080 — CAN / CAN FD
+    _Z_LINK_TYPE_ISOTP,   // RFC-0083 — CAN unicast over ISO-TP
     _Z_LINK_TYPE_CUSTOM,  // nros: Phase 115.B — runtime-pluggable user transport
 };
 
@@ -147,6 +151,9 @@ typedef struct _z_link_t {
 #endif
 #if Z_FEATURE_LINK_IVC == 1
         _z_ivc_socket_t _ivc;
+#endif
+#if Z_FEATURE_LINK_ISOTP == 1
+        _z_isotp_socket_t _isotp;
 #endif
 #if Z_FEATURE_LINK_CAN == 1
         _z_can_socket_t _can;
