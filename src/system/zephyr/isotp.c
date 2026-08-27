@@ -1,0 +1,182 @@
+//
+// Copyright (c) 2026 ZettaScale Technology
+//
+// This program and the accompanying materials are made available under the
+// terms of the Eclipse Public License 2.0 which is available at
+// http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
+// which is available at https://www.apache.org/licenses/LICENSE-2.0.
+//
+// SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+//
+// Contributors:
+//   RFC-0083 / phase-394 W5 — the Zephyr ISO-TP link.
+//
+
+// Zephyr has its own ISO-TP in `subsys/canbus/isotp`, and this port uses it
+// rather than the vendored `third_party/isotp-c`. That is the same rule the
+// unix port follows with the kernel's CAN_ISOTP socket: where the platform
+// implements the protocol, the platform's implementation wins. It is tested by
+// its own conformance suite, it is maintained with the CAN drivers it sits on,
+// and it is what a Zephyr application would be using anyway.
+//
+// CONFIG_ISOTP must be set. Zephyr marks it [EXPERIMENTAL] in Kconfig; see
+// docs/roadmap/phase-394-can-unicast-for-zenoh-pico.md for what its test
+// suites actually cover, which is worth knowing before an island depends on
+// services over this link.
+
+#include "zenoh-pico/config.h"
+
+#if Z_FEATURE_LINK_ISOTP == 1
+
+#include <zephyr/canbus/isotp.h>
+#include <zephyr/device.h>
+#include <zephyr/kernel.h>
+
+#include "zenoh-pico/system/link/isotp.h"
+#include "zenoh-pico/utils/logging.h"
+
+// Zephyr's contexts are large (each carries a buffer queue and a work item) and
+// must outlive every call, so they live here rather than in the socket. The
+// socket holds an index.
+#ifndef Z_ISOTP_MAX_LINKS
+#define Z_ISOTP_MAX_LINKS 2
+#endif
+
+typedef struct {
+    bool _taken;
+    struct isotp_recv_ctx _recv;
+    struct isotp_send_ctx _send;
+    struct isotp_msg_id _tx_addr;
+    struct isotp_msg_id _rx_addr;
+    const struct device *_dev;
+} _z_isotp_zslot_t;
+
+static _z_isotp_zslot_t _z_isotp_zslots[Z_ISOTP_MAX_LINKS];
+K_MUTEX_DEFINE(_z_isotp_zslot_mutex);
+
+// Flow control this receiver asks the sender for. `bs = 0` means "send the
+// whole PDU without stopping", matching what the Linux kernel asks for, so a
+// Zephyr node and a Linux node pace each other the same way. `stmin = 0` leaves
+// the separation time to the bus rather than adding software delay.
+static const struct isotp_fc_opts _z_isotp_fc = {.bs = 0, .stmin = 0};
+
+static _z_isotp_zslot_t *__z_zslot_take(void) {
+    _z_isotp_zslot_t *out = NULL;
+    k_mutex_lock(&_z_isotp_zslot_mutex, K_FOREVER);
+    for (int i = 0; i < Z_ISOTP_MAX_LINKS; i++) {
+        if (!_z_isotp_zslots[i]._taken) {
+            _z_isotp_zslots[i]._taken = true;
+            out = &_z_isotp_zslots[i];
+            break;
+        }
+    }
+    k_mutex_unlock(&_z_isotp_zslot_mutex);
+    return out;
+}
+
+static int __z_zslot_index(const _z_isotp_zslot_t *slot) { return (int)(slot - _z_isotp_zslots); }
+
+z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff) {
+    const struct device *can_dev = device_get_binding(dev);
+    if ((can_dev == NULL) || !device_is_ready(can_dev)) {
+        _Z_ERROR("ISO-TP: CAN device '%s' is absent or not ready", dev);
+        return _Z_ERR_GENERIC;
+    }
+
+    _z_isotp_zslot_t *slot = __z_zslot_take();
+    if (slot == NULL) {
+        _Z_ERROR("ISO-TP: no free link slot (max %d)", Z_ISOTP_MAX_LINKS);
+        return _Z_ERR_GENERIC;
+    }
+
+    slot->_dev = can_dev;
+    // Only ISO-TP NORMAL addressing, on purpose: extended and mixed addressing
+    // are a deliberate non-goal, because no portable implementation provides
+    // them and normal addressing is the interoperable common denominator.
+    slot->_tx_addr.id_type = eff ? ISOTP_FIXED_ADDR : ISOTP_STD_ADDR;
+    slot->_tx_addr.ext_addr = 0;
+    slot->_tx_addr.std_id = tx_id;
+    slot->_rx_addr.id_type = slot->_tx_addr.id_type;
+    slot->_rx_addr.ext_addr = 0;
+    slot->_rx_addr.std_id = rx_id;
+    if (eff) {
+        slot->_tx_addr.ext_id = tx_id;
+        slot->_rx_addr.ext_id = rx_id;
+    }
+
+    // Bind the RECEIVE side once, at open. Zephyr installs a CAN filter here,
+    // and a controller has few filter slots -- binding per read would exhaust
+    // them and would also drop everything that arrived between reads.
+    int ret = isotp_bind(&slot->_recv, can_dev, &slot->_rx_addr, &slot->_tx_addr, &_z_isotp_fc, K_FOREVER);
+    if (ret != ISOTP_N_OK) {
+        _Z_ERROR("ISO-TP: isotp_bind(rx=0x%x tx=0x%x) failed: %d", (unsigned)rx_id, (unsigned)tx_id, ret);
+        slot->_taken = false;
+        return _Z_ERR_GENERIC;
+    }
+
+    sock->_sock._isotp_dev = can_dev;
+    sock->_sock._isotp_slot = __z_zslot_index(slot);
+    sock->_tx_id = tx_id;
+    sock->_rx_id = rx_id;
+    sock->_eff = eff;
+    return _Z_RES_OK;
+}
+
+void _z_close_isotp(_z_isotp_socket_t *sock) {
+    int idx = sock->_sock._isotp_slot;
+    if ((idx < 0) || (idx >= Z_ISOTP_MAX_LINKS)) {
+        return;
+    }
+    _z_isotp_zslot_t *slot = &_z_isotp_zslots[idx];
+    if (slot->_taken) {
+        isotp_unbind(&slot->_recv);  // releases the controller's filter slot
+        slot->_taken = false;
+    }
+    sock->_sock._isotp_slot = -1;
+}
+
+size_t _z_read_isotp_socket(const _z_sys_net_socket_t socket, uint8_t *ptr, size_t len) {
+    int idx = socket._isotp_slot;
+    if ((idx < 0) || (idx >= Z_ISOTP_MAX_LINKS) || !_z_isotp_zslots[idx]._taken) {
+        _Z_ERROR("ISO-TP: read on a socket with no bound link");
+        return SIZE_MAX;
+    }
+    // K_FOREVER: this is the transport's read task and it is expected to block.
+    int ret = isotp_recv(&_z_isotp_zslots[idx]._recv, ptr, len, K_FOREVER);
+    if (ret < 0) {
+        _Z_ERROR("ISO-TP: isotp_recv failed: %d", ret);
+        return SIZE_MAX;
+    }
+    return (size_t)ret;
+}
+
+size_t _z_read_isotp(const _z_isotp_socket_t *sock, uint8_t *ptr, size_t len) {
+    return _z_read_isotp_socket(sock->_sock, ptr, len);
+}
+
+size_t _z_send_isotp(const _z_isotp_socket_t *sock, const uint8_t *ptr, size_t len) {
+    if (len > _Z_ISOTP_MTU_SIZE) {
+        _Z_ERROR("ISO-TP: PDU %zu exceeds the 12-bit FF_DL limit of %d", len, _Z_ISOTP_MTU_SIZE);
+        return SIZE_MAX;
+    }
+    int idx = sock->_sock._isotp_slot;
+    if ((idx < 0) || (idx >= Z_ISOTP_MAX_LINKS) || !_z_isotp_zslots[idx]._taken) {
+        _Z_ERROR("ISO-TP: send on a socket with no bound link");
+        return SIZE_MAX;
+    }
+    _z_isotp_zslot_t *slot = &_z_isotp_zslots[idx];
+
+    // A NULL completion callback makes isotp_send BLOCK until the whole PDU is
+    // out, which is the contract the link expects: a send that returns is a
+    // send the peer has paced through flow control. It is also what settles
+    // N_As on this platform -- the transmit confirmation is Zephyr's problem,
+    // inside the CAN driver, rather than something this port has to time.
+    int ret = isotp_send(&slot->_send, slot->_dev, ptr, len, &slot->_tx_addr, &slot->_rx_addr, NULL, NULL);
+    if (ret != ISOTP_N_OK) {
+        _Z_ERROR("ISO-TP: isotp_send of %zu bytes failed: %d", len, ret);
+        return SIZE_MAX;
+    }
+    return len;
+}
+
+#endif  // Z_FEATURE_LINK_ISOTP == 1
