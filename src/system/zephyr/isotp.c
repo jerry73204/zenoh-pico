@@ -30,6 +30,8 @@
 
 #include <zephyr/canbus/isotp.h>
 #include <zephyr/device.h>
+#include <string.h>
+
 #include <zephyr/kernel.h>
 
 #include "zenoh-pico/system/link/isotp.h"
@@ -90,19 +92,32 @@ z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_i
     }
 
     slot->_dev = can_dev;
+
     // Only ISO-TP NORMAL addressing, on purpose: extended and mixed addressing
     // are a deliberate non-goal, because no portable implementation provides
-    // them and normal addressing is the interoperable common denominator.
-    slot->_tx_addr.id_type = eff ? ISOTP_FIXED_ADDR : ISOTP_STD_ADDR;
-    slot->_tx_addr.ext_addr = 0;
-    slot->_tx_addr.std_id = tx_id;
-    slot->_rx_addr.id_type = slot->_tx_addr.id_type;
-    slot->_rx_addr.ext_addr = 0;
-    slot->_rx_addr.std_id = rx_id;
+    // them and normal addressing is the interoperable common denominator. So
+    // `ext_addr` stays 0 and ISOTP_MSG_EXT_ADDR is never set.
+    //
+    // `std_id` and `ext_id` are a UNION in Zephyr's isotp_msg_id -- 11 bits and
+    // 29 bits over the same storage -- so exactly one is written, chosen by
+    // ISOTP_MSG_IDE. Writing both would silently truncate the 29-bit value.
+    // Addressing mode lives in `flags`; there is no `id_type` member. That was
+    // the pre-3.7 API, and reaching for it fails to compile rather than
+    // misbehaving at runtime -- which is how this was caught.
+    memset(&slot->_tx_addr, 0, sizeof(slot->_tx_addr));
+    memset(&slot->_rx_addr, 0, sizeof(slot->_rx_addr));
+    slot->_tx_addr.flags = eff ? ISOTP_MSG_IDE : 0;
+    slot->_rx_addr.flags = slot->_tx_addr.flags;
     if (eff) {
         slot->_tx_addr.ext_id = tx_id;
         slot->_rx_addr.ext_id = rx_id;
+    } else {
+        slot->_tx_addr.std_id = tx_id;
+        slot->_rx_addr.std_id = rx_id;
     }
+    // `dl` is left 0, which Zephyr reads as 8: classical CAN framing. That is
+    // the point of this link -- ISO-TP is what makes an 8-byte frame carry a
+    // 4095-byte PDU, and classical CAN is most of the hardware in the field.
 
     // Bind the RECEIVE side once, at open. Zephyr installs a CAN filter here,
     // and a controller has few filter slots -- binding per read would exhaust
