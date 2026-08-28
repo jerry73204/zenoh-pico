@@ -862,10 +862,18 @@ static volatile bool _z_serial_rx_ring_full = false;
 static void _z_serial_isr(const struct device *dev, void *user_data) {
     ARG_UNUSED(user_data);
 
-    while (uart_irq_update(dev) && uart_irq_is_pending(dev)) {
-        if (uart_irq_rx_ready(dev) == 0) {
-            break;
-        }
+    /* The canonical Zephyr shape. An earlier version guarded the loop with
+       `uart_irq_is_pending()` and `break`-ed when RX was not ready -- which
+       can leave the interrupt ASSERTED and unhandled, because
+       `uart_irq_is_pending` is true for a TX cause as well. The ISR then
+       re-enters immediately and forever, and the symptom is not a lost byte
+       but a CPU that stops making progress: the board completed discovery at
+       boot and then went silent the moment real traffic arrived. */
+    if (uart_irq_update(dev) == 0) {
+        return;
+    }
+
+    while (uart_irq_rx_ready(dev)) {
         /* Drain the hardware FIFO in as few calls as possible: the mcux LPUART
            `fifo_read` loops while the RX register is full, so a large ask is
            one call rather than one per byte. */
