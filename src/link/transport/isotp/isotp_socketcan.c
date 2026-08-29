@@ -46,13 +46,31 @@
 // rx comes FIRST. The fields are set by name below so that reading this code
 // against the struct cannot silently swap the two -- a swap costs no error at
 // bind() time and simply produces a channel where nothing ever arrives.
-z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff) {
+z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff,
+                         uint8_t stmin, uint8_t bs) {
     int fd = socket(PF_CAN, SOCK_DGRAM, CAN_ISOTP);
     if (fd < 0) {
         // ENOPROTOOPT here means the can-isotp module is not loaded, which is
         // by far the most common way this fails on an otherwise fine system.
         _Z_ERROR("ISO-TP: socket(PF_CAN, CAN_ISOTP) failed: %d (is the can-isotp module loaded?)", errno);
         return _Z_ERR_GENERIC;
+    }
+
+    // Flow control before bind: the kernel refuses these options once the
+    // socket is bound. Left at zero it advertises "send it all, no waiting",
+    // which is right facing another Linux box and wrong facing a node that
+    // cannot take a burst.
+    if ((stmin != 0u) || (bs != 0u)) {
+        struct can_isotp_fc_options fc;
+        memset(&fc, 0, sizeof(fc));
+        fc.bs = bs;
+        fc.stmin = stmin;
+        fc.wftmax = 0;
+        if (setsockopt(fd, SOL_CAN_ISOTP, CAN_ISOTP_RECV_FC, &fc, sizeof(fc)) < 0) {
+            _Z_ERROR("ISO-TP: setting flow control (stmin=%u bs=%u) failed: %d", (unsigned)stmin, (unsigned)bs, errno);
+            close(fd);
+            return _Z_ERR_GENERIC;
+        }
     }
 
     struct ifreq ifr;
