@@ -987,7 +987,7 @@ z_result_t _z_open_serial_from_pins(_z_sys_net_socket_t *sock, uint32_t txpin, u
 }
 
 z_result_t _z_listen_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint32_t baudrate) {
-    // Serial is symmetric — listen is same as open
+    // Serial is symmetric -- listen is same as open
     return _z_open_serial_from_dev(sock, dev, baudrate);
 }
 
@@ -1238,7 +1238,7 @@ size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_sli
         size_t dlen = frame.data[0];
         if ((dlen > (size_t)(frame.len - _Z_CAN_LEN_PREFIX)) || (dlen > len)) {
             // Length byte disagrees with the frame, or the caller's buffer is
-            // too small. Either way this datagram is unusable — drop it rather
+            // too small. Either way this datagram is unusable -- drop it rather
             // than hand back a truncated one that would deserialize as garbage.
             _Z_ERROR("CAN: bad datagram length %zu (frame %u, buffer %zu)", dlen, (unsigned)frame.len, len);
             continue;

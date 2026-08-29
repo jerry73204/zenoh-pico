@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0083 / phase-394 — CAN unicast over ISO-TP.
+//   RFC-0083 / phase-394 -- CAN unicast over ISO-TP.
 //
 
 #include <stddef.h>

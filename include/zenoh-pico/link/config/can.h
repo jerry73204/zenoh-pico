@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0080 / phase-377 — CAN and CAN FD link transport.
+//   RFC-0080 / phase-377 -- CAN and CAN FD link transport.
 //
 
 #ifndef ZENOH_PICO_LINK_CONFIG_CAN_H
@@ -43,8 +43,8 @@ extern "C" {
 // bus with ordinary vehicle traffic by claiming an identifier band rather than
 // the whole bus.
 //
-// Identifier value IS bus priority on CAN — a LOWER identifier wins arbitration
-// — so `id` is a real-time decision, not a name.
+// Identifier value IS bus priority on CAN -- a LOWER identifier wins arbitration
+// -- so `id` is a real-time decision, not a name.
 //
 // The peer that must not be delayed needs the lower identifier. On a safety
 // island that is the node publishing the stop command, NOT the one publishing

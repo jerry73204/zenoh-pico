@@ -36,7 +36,7 @@
 
 #include "zenoh-pico/collections/string.h"
 
-// RFC-0080 — after the zenoh includes, so Z_FEATURE_LINK_CAN is defined.
+// RFC-0080 -- after the zenoh includes, so Z_FEATURE_LINK_CAN is defined.
 #if Z_FEATURE_LINK_CAN == 1
 #include <zephyr/device.h>
 #include <zephyr/drivers/can.h>

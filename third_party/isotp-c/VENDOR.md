@@ -1,27 +1,43 @@
-# isotp-c — vendored
+# isotp-c -- vendored
 
 | | |
 | --- | --- |
-| Upstream | https://github.com/SimonCahill/isotp-c |
-| Commit | `abb9e552df0e7ca0148c146124795341d57124fe` |
+| Vendored from | https://github.com/jerry73204/isotp-c |
+| Commit | `8aa1b2a` |
+| Fork of | https://github.com/SimonCahill/isotp-c @ `abb9e552df0e7ca0148c146124795341d57124fe` |
 | Licence | MIT (`LICENSE`, verbatim) |
 | Vendored for | RFC-0083 / phase-394 W0 |
 
 A portable ISO 15765-2 implementation for the platforms that have no ISO-TP of
 their own. Linux has it in the kernel (`CAN_ISOTP`) and Zephyr in
 `subsys/canbus/isotp`; both are used in preference. This library is for
-everything else — FreeRTOS, ThreadX, NuttX, bare metal.
+everything else -- FreeRTOS, ThreadX, NuttX, bare metal.
+
+## Why a fork, and what is in it
+
+One commit on top of `abb9e55`, adding an `ISO_TP_NO_FORMATTED_ERRORS` build
+flag. `snprintf` is the library's only libc dependency beyond
+`memcpy`/`memset`, and it exists for two formatted diagnostics, each writing
+into a 128-byte stack buffer. The flag omits both; the errors still go through
+`isotp_user_debug()` and the return codes are unchanged. Off by default.
+
+Cortex-M4, `-Os -DNDEBUG -ffreestanding`: `.text` 2235 -> 2091 bytes, largest
+stack frame 160 -> 32 bytes, and the object then needs nothing from libc but
+`memcpy` and `memset`.
+
+Staging, not a destination: the change belongs upstream, and this table should
+point back at `SimonCahill/isotp-c` once it lands there.
 
 ## Why this one
 
-The survey is in RFC-0083 §3 and is recorded so nobody re-litigates it. The two
+The survey is in RFC-0083 section 3 and is recorded so nobody re-litigates it. The two
 near misses are **licence** rejections, not technical ones:
 
-* `devcoons/iso15765-canbus` — AGPL-3.0
-* `altelch/iso-tp` — GPL-3.0
+* `devcoons/iso15765-canbus` -- AGPL-3.0
+* `altelch/iso-tp` -- GPL-3.0
 
 Neither can enter this tree. `SimonCahill/isotp-c` is MIT, is a maintained fork
-of the widely used `lishen2/isotp-c`, and **uses no allocator at all** — `grep
+of the widely used `lishen2/isotp-c`, and **uses no allocator at all** -- `grep
 -c 'malloc\|calloc\|free('` over `isotp.c` returns 0. The caller supplies both
 buffers to `isotp_init_link`, which is what makes it usable on an MCU with no
 heap.
@@ -30,7 +46,7 @@ heap.
 
 Only the library itself is vendored: `isotp.c`, `isotp.h`, `isotp_config.h`,
 `isotp_defines.h`, `isotp_user.h`, `LICENSE`. Upstream's build system, tests,
-Doxygen config and submodules are not — zenoh-pico builds the one translation
+Doxygen config and submodules are not -- zenoh-pico builds the one translation
 unit directly.
 
 ## Proven on an MCU
@@ -72,7 +88,7 @@ and `isotp_poll` runs its timers. There is no thread and no I/O inside it.
 `isotp_user_send_can` returns as soon as the frame is handed to the driver, not
 when the bus has acknowledged it. ISO 15765-2's `N_As` is the *transmit
 confirmation* time, so on a platform whose send is asynchronous the library
-cannot measure it and neither can this hook. RFC-0083 §3 records that no
+cannot measure it and neither can this hook. RFC-0083 section 3 records that no
 portable ISO-TP library supplies this. The port must either block in the hook
 until transmit-confirm or add its own timer; see the `unix` port in
 `src/system/unix/network.c`, which documents which of the two it does and why.
@@ -81,5 +97,5 @@ until transmit-confirm or add its own timer; see the `unix` port in
 
 Bump the commit above, re-copy the six files, and re-run
 `scripts/test/isotp-pico-interop.sh` plus the vendored-vs-kernel comparison
-(phase-394 W4) — the kernel is the oracle for this library on Linux, which is
+(phase-394 W4) -- the kernel is the oracle for this library on Linux, which is
 the whole reason the `unix` platform implements the link twice.

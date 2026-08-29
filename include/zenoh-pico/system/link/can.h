@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0080 / phase-377 — CAN and CAN FD link transport.
+//   RFC-0080 / phase-377 -- CAN and CAN FD link transport.
 //
 
 #ifndef ZENOH_PICO_SYSTEM_LINK_CAN_H
@@ -30,8 +30,8 @@ extern "C" {
 
 // One CAN frame carries one zenoh datagram.
 //
-// CAN FD payload lengths are quantised — the DLC encodes 0..8, 12, 16, 20, 24,
-// 32, 48, 64 and nothing between — so a 40-byte datagram travels in a 48-byte
+// CAN FD payload lengths are quantised -- the DLC encodes 0..8, 12, 16, 20, 24,
+// 32, 48, 64 and nothing between -- so a 40-byte datagram travels in a 48-byte
 // frame and the receiver cannot recover the true length from the frame alone.
 // Byte 0 of every payload is therefore the datagram length and bytes 1..N are
 // the datagram, which costs one byte and keeps the link from having to parse
@@ -51,7 +51,7 @@ extern "C" {
 
 // A CAN bus is a broadcast medium: every node hears every frame and filters by
 // identifier. That is a MULTICAST link, not a unicast one, and modelling it as
-// unicast is what the first revision of RFC-0080 got wrong — zenoh's unicast
+// unicast is what the first revision of RFC-0080 got wrong -- zenoh's unicast
 // listen path goes through `_zp_unicast_accept_task`, which needs a socket and
 // an accept() that no datagram medium has.
 //
@@ -62,7 +62,7 @@ extern "C" {
 // loops until it sees a datagram that is not its own, then reports the sender.
 typedef struct {
     _z_sys_net_socket_t _sock;
-    uint32_t _id;    // this peer's identifier — its address on the bus
+    uint32_t _id;    // this peer's identifier -- its address on the bus
     uint32_t _match; // accept frames whose (id & _mask) == _match
     uint32_t _mask;  // 0 accepts every identifier
     uint16_t _mtu;   // _Z_CAN_FD_MTU_SIZE or _Z_CAN_CLASSIC_MTU_SIZE
@@ -80,7 +80,7 @@ typedef struct {
  * `dbitrate` of 0 selects classic CAN; any other value selects CAN FD with
  * that data-phase rate. On platforms whose interface is preconfigured (a
  * Linux `ip link set`, or a Zephyr devicetree `bitrate` property) the rate
- * arguments may be advisory — the call must still succeed rather than fail
+ * arguments may be advisory -- the call must still succeed rather than fail
  * on a rate it cannot apply, and must report the mode it actually got in
  * `sock->_fd_mode`.
  */

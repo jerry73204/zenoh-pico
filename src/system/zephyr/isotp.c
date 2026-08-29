@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0083 / phase-394 W5 — the Zephyr ISO-TP link.
+//   RFC-0083 / phase-394 W5 -- the Zephyr ISO-TP link.
 //
 
 // Zephyr has its own ISO-TP in `subsys/canbus/isotp`, and this port uses it
