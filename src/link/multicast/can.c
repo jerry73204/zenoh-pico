@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0080 / phase-377 — CAN and CAN FD link transport.
+//   RFC-0080 / phase-377 -- CAN and CAN FD link transport.
 //
 
 #include <stddef.h>
@@ -51,7 +51,7 @@ z_result_t _z_endpoint_can_valid(_z_endpoint_t *endpoint) {
 }
 
 // Read one unsigned integer config value, accepting decimal and 0x-prefixed
-// hex — identifiers are conventionally written in hex, bit rates in decimal,
+// hex -- identifiers are conventionally written in hex, bit rates in decimal,
 // and forcing one notation on both would make every endpoint harder to read.
 static uint32_t __z_can_cfg_u32(const _z_str_intmap_t *cfg, uint8_t key, uint32_t dflt) {
     char *s = _z_str_intmap_get(cfg, key);
@@ -120,7 +120,7 @@ static z_result_t __z_can_open(_z_link_t *self) {
 
     // The platform reports the mode it actually obtained; a preconfigured
     // interface may not be in the mode the endpoint asked for. Track the MTU
-    // from what we got, not from what we requested — declaring 63 on a
+    // from what we got, not from what we requested -- declaring 63 on a
     // classic-CAN interface would silently truncate every frame.
     self->_mtu = self->_socket._can._mtu;
     return _Z_RES_OK;
@@ -164,7 +164,7 @@ size_t _z_f_link_read_exact_can(const _z_link_t *self, uint8_t *ptr, size_t len,
 size_t _z_f_link_read_socket_can(const _z_sys_net_socket_t socket, uint8_t *ptr, size_t len) {
     // Wired for symmetry with the other transports. A CAN link dispatches
     // through its own callbacks because the read must filter on the receive
-    // identifier, which a bare socket read cannot do — reaching here is a
+    // identifier, which a bare socket read cannot do -- reaching here is a
     // logic bug at the call site.
     _ZP_UNUSED(socket);
     _ZP_UNUSED(ptr);
@@ -177,7 +177,7 @@ uint16_t _z_get_link_mtu_can(void) { return _Z_CAN_MTU_SIZE; }
 
 z_result_t _z_new_link_can(_z_link_t *zl, _z_endpoint_t endpoint) {
     zl->_type = _Z_LINK_TYPE_CAN;
-    // A CAN bus is a broadcast medium — every node hears every frame and
+    // A CAN bus is a broadcast medium -- every node hears every frame and
     // filters by identifier. Declaring UNICAST instead routes the listen side
     // through _zp_unicast_accept_task, which needs a socket and an accept()
     // that no datagram medium has, and the handshake never completes.
@@ -187,7 +187,7 @@ z_result_t _z_new_link_can(_z_link_t *zl, _z_endpoint_t endpoint) {
     // build segmentation and reassembly internally, and zenoh would then
     // fragment on top of it (RFC-0080 section 3).
     zl->_cap._flow = Z_LINK_CAP_FLOW_DATAGRAM;
-    // Reliable at frame level — CRC, ACK slot, automatic retransmission — but
+    // Reliable at frame level -- CRC, ACK slot, automatic retransmission -- but
     // not end to end: controller buffers overrun and bus-off drops everything.
     // Let zenoh's own reliability cover that, as the IVC link does.
     zl->_cap._is_reliable = false;

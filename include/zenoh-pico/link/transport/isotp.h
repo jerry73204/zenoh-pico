@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0083 / phase-394 — CAN unicast over ISO-TP.
+//   RFC-0083 / phase-394 -- CAN unicast over ISO-TP.
 //
 
 #ifndef ZENOH_PICO_SYSTEM_LINK_ISOTP_H
@@ -30,7 +30,7 @@ extern "C" {
 // A CAN frame names a message, not a destination: there is no source or
 // destination field and every node hears every frame. ISO 15765-2 builds
 // point-to-point addressing on top of that from a DIRECTED IDENTIFIER PAIR plus
-// flow control — the receiver must answer a first frame and then paces the
+// flow control -- the receiver must answer a first frame and then paces the
 // sender, so exactly one peer may own the other end of a pair. That pairing is
 // the address.
 //
@@ -38,7 +38,7 @@ extern "C" {
 // CAN link of RFC-0080:
 //
 //   * segmentation moves below zenoh, so the MTU is 4095 bytes rather than
-//     seven, which is what makes CLASSIC CAN usable — and classic CAN is most
+//     seven, which is what makes CLASSIC CAN usable -- and classic CAN is most
 //     of the hardware in the field;
 //   * it is UNICAST, and zenoh routes queries and liveliness only to unicast
 //     faces, so this link can carry ROS services, actions, parameters and graph
@@ -65,7 +65,7 @@ typedef struct {
  * Open an ISO-TP channel.
  *
  * `tx_id` and `rx_id` are a directed pair: this peer's `tx_id` must be the other
- * peer's `rx_id`. Only ISO-TP NORMAL addressing is used — extended and mixed
+ * peer's `rx_id`. Only ISO-TP NORMAL addressing is used -- extended and mixed
  * addressing are a deliberate non-goal, because no portable implementation
  * provides them and normal addressing is the interoperable common denominator.
  */

@@ -193,7 +193,7 @@ size_t _z_read_can(const _z_can_socket_t *sock, uint8_t *ptr, size_t len, _z_sli
         size_t dlen = frame.data[0];
         if ((dlen > (size_t)(frame.len - _Z_CAN_LEN_PREFIX)) || (dlen > len)) {
             // Length byte disagrees with the frame, or the caller's buffer is
-            // too small. Either way this datagram is unusable — drop it rather
+            // too small. Either way this datagram is unusable -- drop it rather
             // than hand back a truncated one that would deserialize as garbage.
             _Z_ERROR("CAN: bad datagram length %zu (frame %u, buffer %zu)", dlen, (unsigned)frame.len, len);
             continue;

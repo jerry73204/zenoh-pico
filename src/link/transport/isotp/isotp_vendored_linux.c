@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0083 / phase-394 W4 — the `unix` ISO-TP link on the VENDORED library.
+//   RFC-0083 / phase-394 W4 -- the `unix` ISO-TP link on the VENDORED library.
 //
 
 // THE POINT OF THIS FILE IS THAT IT DUPLICATES network.c.
