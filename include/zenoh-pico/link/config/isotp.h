@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0083 / phase-394 — CAN unicast over ISO-TP.
+//   RFC-0083 / phase-394 -- CAN unicast over ISO-TP.
 //
 
 #ifndef ZENOH_PICO_LINK_CONFIG_ISOTP_H
@@ -39,7 +39,7 @@ extern "C" {
 // both directions would mean a peer receiving its own PDUs and answering its
 // own flow control.
 //
-// Identifier value is bus priority — a LOWER identifier wins arbitration — so
+// Identifier value is bus priority -- a LOWER identifier wins arbitration -- so
 // these are real-time decisions rather than names. The peer that must not be
 // delayed needs the lower identifier.
 

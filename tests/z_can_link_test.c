@@ -9,7 +9,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 //
 // Contributors:
-//   RFC-0080 / phase-377 — CAN and CAN FD link transport.
+//   RFC-0080 / phase-377 -- CAN and CAN FD link transport.
 //
 
 // Link-level test for the CAN transport. Exercises the platform binding
@@ -77,7 +77,7 @@ static void roundtrip(_z_can_socket_t *a, _z_can_socket_t *b, size_t len, const 
         return;
     }
 
-    // The sender identifier must come back through `addr` — that is how the
+    // The sender identifier must come back through `addr` -- that is how the
     // multicast transport tells peers apart.
     uint32_t reported = (uint32_t)addrbuf[0] | ((uint32_t)addrbuf[1] << 8) | ((uint32_t)addrbuf[2] << 16) |
                         ((uint32_t)addrbuf[3] << 24);
@@ -95,7 +95,7 @@ int main(void) {
     const char *dev = CAN_DEV;
 
     if (if_nametoindex(dev) == 0) {
-        printf("z_can_link_test: no interface '%s' — skipping\n", dev);
+        printf("z_can_link_test: no interface '%s' -- skipping\n", dev);
         printf("  create one with: sudo ip link add dev vcan0 type vcan && sudo ip link set up vcan0\n");
         return 0;
     }
@@ -123,7 +123,7 @@ int main(void) {
     printf("  mode: %s, MTU %u\n", a._fd_mode ? "CAN FD" : "classic CAN", (unsigned)a._mtu);
 
     // Boundaries that matter: empty, one byte, each side of a DLC step, and
-    // the MTU itself. The DLC steps are where a length-prefix bug hides —
+    // the MTU itself. The DLC steps are where a length-prefix bug hides --
     // a 12-byte payload rides in a 12-byte frame, a 13-byte one in a 16.
     roundtrip(&a, &b, 0, "empty datagram");
     roundtrip(&a, &b, 1, "1 byte");
@@ -156,7 +156,7 @@ int main(void) {
 #else
 
 int main(void) {
-    printf("z_can_link_test: built without Z_FEATURE_LINK_CAN — skipping\n");
+    printf("z_can_link_test: built without Z_FEATURE_LINK_CAN -- skipping\n");
     return 0;
 }
 
