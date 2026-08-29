@@ -31,8 +31,39 @@
 #define SERIAL_CONNECT_MAX_ATTEMPTS 10
 #endif
 
+/* issue 0879 — the INIT retry is for the COLD START only.
+ *
+ * It was added (b0afc537) because an MCU's first frame goes out microseconds
+ * after reset, into a line the reset itself disturbed, and a single lost INIT
+ * left the link dead for good. That reasoning is about the FIRST connect and
+ * nothing else.
+ *
+ * Applying it to a REOPEN is actively harmful. `_z_reopen` calls this every
+ * second after a transport failure, so ten rapid INITs per attempt becomes a
+ * flood -- measured at 840 INIT frames on the wire in one run -- into a router
+ * that is not going to answer. `zenoh-link-serial` treats an INIT arriving on
+ * an established link as a protocol error ("Unexpected Init flag in message")
+ * rather than as a peer announcing it restarted, so every extra INIT is one
+ * more error on a link that is already stuck.
+ *
+ * The comment on the retry claimed "a peer that is already initialised answers
+ * a second INIT with RESET". That is what the protocol says should happen and
+ * is NOT what this router does. Retrying against a peer that answers nothing
+ * is not resilience, it is a busy loop.
+ *
+ * So: retry on the first connect, where the justification holds; after that,
+ * one attempt, and let `_z_reopen`'s own one-second backoff pace the retries.
+ * That keeps the cold-start fix and takes the flood off the wire.
+ *
+ * The router-side half -- accepting a mid-session INIT as a restart and
+ * resetting the link -- is upstream in eclipse-zenoh and is what would let a
+ * reopen actually succeed. */
+static bool _z_serial_ever_connected = false;
+
 z_result_t _z_connect_serial(const _z_sys_net_socket_t sock) {
     unsigned int attempts = 0;
+    const unsigned int max_attempts =
+        _z_serial_ever_connected ? 1U : (unsigned int)SERIAL_CONNECT_MAX_ATTEMPTS;
     while (true) {
         uint8_t header = _Z_FLAG_SERIAL_INIT;
 
@@ -48,7 +79,7 @@ z_result_t _z_connect_serial(const _z_sys_net_socket_t sock) {
                expects: a peer that is already initialised answers a second INIT
                with RESET, which the branch below throttles and retries. */
             attempts++;
-            if (attempts >= (unsigned int)SERIAL_CONNECT_MAX_ATTEMPTS) {
+            if (attempts >= max_attempts) {
                 _Z_ERROR_RETURN(_Z_ERR_TRANSPORT_RX_FAILED);
             }
             z_sleep_ms(SERIAL_CONNECT_THROTTLE_TIME_MS);
@@ -57,6 +88,7 @@ z_result_t _z_connect_serial(const _z_sys_net_socket_t sock) {
 
         if (_Z_HAS_FLAG(header, _Z_FLAG_SERIAL_ACK) && _Z_HAS_FLAG(header, _Z_FLAG_SERIAL_INIT)) {
             _Z_DEBUG("connected");
+            _z_serial_ever_connected = true;
             break;
         } else if (_Z_HAS_FLAG(header, _Z_FLAG_SERIAL_RESET)) {
             z_sleep_ms(SERIAL_CONNECT_THROTTLE_TIME_MS);
