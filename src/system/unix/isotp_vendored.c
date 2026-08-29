@@ -138,7 +138,17 @@ static void __z_pump_rx(_z_isotp_slot_t *slot) {
 
 // ------------------------------------------------------------------ the link
 
-z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff) {
+z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff,
+                         uint8_t stmin, uint8_t bs) {
+    // The vendored library takes its flow control values from compile-time
+    // constants (ISO_TP_DEFAULT_BLOCK_SIZE, ISO_TP_DEFAULT_ST_MIN_US) rather
+    // than per link, so it cannot honour these. Refusing beats accepting the
+    // endpoint and pacing nothing: a peer that asked to be protected from a
+    // burst would not find out until it dropped frames on a real bus.
+    if ((stmin != 0u) || (bs != 0u)) {
+        _Z_ERROR("ISO-TP(vendored): stmin and bs need the kernel backend; this build sets them at compile time");
+        return _Z_ERR_CONFIG_LOCATOR_INVALID;
+    }
     pthread_mutex_lock(&_z_isotp_slots_lock);
     _z_isotp_slot_t *slot = NULL;
     for (size_t i = 0; i < _Z_ISOTP_VENDORED_MAX_LINKS; i++) {

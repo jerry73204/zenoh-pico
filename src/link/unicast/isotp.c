@@ -12,12 +12,13 @@
 //   RFC-0083 / phase-394 -- CAN unicast over ISO-TP.
 //
 
+#include "zenoh-pico/link/config/isotp.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "zenoh-pico/config.h"
-#include "zenoh-pico/link/config/isotp.h"
 #include "zenoh-pico/link/manager.h"
 #include "zenoh-pico/system/link/isotp.h"
 #include "zenoh-pico/utils/logging.h"
@@ -117,6 +118,17 @@ static z_result_t __z_isotp_open(_z_link_t *self) {
     uint32_t tx_id = __z_isotp_cfg_u32(cfg, ISOTP_CONFIG_TX_ID_KEY, 0, &has_tx);
     uint32_t rx_id = __z_isotp_cfg_u32(cfg, ISOTP_CONFIG_RX_ID_KEY, 0, &has_rx);
     _Bool eff = (__z_isotp_cfg_u32(cfg, ISOTP_CONFIG_EFF_KEY, 0, NULL) != 0u);
+    // Both are a single octet of the flow control frame, so a wider value is a
+    // typo rather than an intent. Clamping would hide it; refusing names it.
+    uint32_t stmin_cfg = __z_isotp_cfg_u32(cfg, ISOTP_CONFIG_STMIN_KEY, 0, NULL);
+    uint32_t bs_cfg = __z_isotp_cfg_u32(cfg, ISOTP_CONFIG_BS_KEY, 0, NULL);
+    if ((stmin_cfg > 0xFFu) || (bs_cfg > 0xFFu)) {
+        _Z_ERROR("ISO-TP: %s and %s are one byte each of the flow control frame, so 0..255", ISOTP_CONFIG_STMIN_STR,
+                 ISOTP_CONFIG_BS_STR);
+        return _Z_ERR_CONFIG_LOCATOR_INVALID;
+    }
+    uint8_t stmin = (uint8_t)stmin_cfg;
+    uint8_t bs = (uint8_t)bs_cfg;
 
     // Both are required. Defaulting either one would produce a link that opens
     // and then silently never communicates.
@@ -128,8 +140,8 @@ static z_result_t __z_isotp_open(_z_link_t *self) {
     // ISO-TP addresses a peer by a DIRECTED pair; one identifier for both
     // directions would have this peer answering its own flow control.
     if (tx_id == rx_id) {
-        _Z_ERROR("ISO-TP: %s and %s are both 0x%x, but they must be a directed pair",
-                 ISOTP_CONFIG_TX_ID_STR, ISOTP_CONFIG_RX_ID_STR, (unsigned)tx_id);
+        _Z_ERROR("ISO-TP: %s and %s are both 0x%x, but they must be a directed pair", ISOTP_CONFIG_TX_ID_STR,
+                 ISOTP_CONFIG_RX_ID_STR, (unsigned)tx_id);
         return _Z_ERR_CONFIG_LOCATOR_INVALID;
     }
 
@@ -139,7 +151,7 @@ static z_result_t __z_isotp_open(_z_link_t *self) {
         return _Z_ERR_CONFIG_LOCATOR_INVALID;
     }
 
-    z_result_t ret = _z_open_isotp(&self->_socket._isotp, dev, tx_id, rx_id, eff);
+    z_result_t ret = _z_open_isotp(&self->_socket._isotp, dev, tx_id, rx_id, eff, stmin, bs);
     if (ret != _Z_RES_OK) {
         return ret;
     }

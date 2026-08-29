@@ -69,7 +69,8 @@ typedef struct {
  * addressing are a deliberate non-goal, because no portable implementation
  * provides them and normal addressing is the interoperable common denominator.
  */
-z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff);
+z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff,
+                         uint8_t stmin, uint8_t bs);
 
 void _z_close_isotp(_z_isotp_socket_t *sock);
 
