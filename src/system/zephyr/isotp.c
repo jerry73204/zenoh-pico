@@ -28,11 +28,10 @@
 
 #if Z_FEATURE_LINK_ISOTP == 1
 
-#include <zephyr/canbus/isotp.h>
-#include <zephyr/drivers/can.h>
-#include <zephyr/device.h>
 #include <string.h>
-
+#include <zephyr/canbus/isotp.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/can.h>
 #include <zephyr/kernel.h>
 
 #include "zenoh-pico/system/link/isotp.h"
@@ -61,6 +60,12 @@ K_MUTEX_DEFINE(_z_isotp_zslot_mutex);
 // whole PDU without stopping", matching what the Linux kernel asks for, so a
 // Zephyr node and a Linux node pace each other the same way. `stmin = 0` leaves
 // the separation time to the bus rather than adding software delay.
+// Defaults when the endpoint asks for nothing: `bs = 0` says "send the whole
+// PDU without stopping", matching what the Linux kernel asks for, so a Zephyr
+// node and a Linux node pace each other the same way. `stmin = 0` leaves the
+// separation time to the bus rather than adding software delay. An endpoint
+// that sets `stmin` or `bs` overrides both, which is how a node with a slow
+// loop or one frame of buffer keeps a faster peer from overrunning it.
 static const struct isotp_fc_opts _z_isotp_fc = {.bs = 0, .stmin = 0};
 
 static _z_isotp_zslot_t *__z_zslot_take(void) {
@@ -140,7 +145,8 @@ static void __z_isotp_dev_release(const struct device *dev) {
     k_mutex_unlock(&_z_isotp_start_mutex);
 }
 
-z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff) {
+z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_id, uint32_t rx_id, _Bool eff,
+                         uint8_t stmin, uint8_t bs) {
     const struct device *can_dev = device_get_binding(dev);
     if ((can_dev == NULL) || !device_is_ready(can_dev)) {
         _Z_ERROR("ISO-TP: CAN device '%s' is absent or not ready", dev);
@@ -189,7 +195,9 @@ z_result_t _z_open_isotp(_z_isotp_socket_t *sock, const char *dev, uint32_t tx_i
         return _Z_ERR_GENERIC;
     }
 
-    int ret = isotp_bind(&slot->_recv, can_dev, &slot->_rx_addr, &slot->_tx_addr, &_z_isotp_fc, K_FOREVER);
+    const struct isotp_fc_opts fc =
+        ((stmin != 0u) || (bs != 0u)) ? (struct isotp_fc_opts){.bs = bs, .stmin = stmin} : _z_isotp_fc;
+    int ret = isotp_bind(&slot->_recv, can_dev, &slot->_rx_addr, &slot->_tx_addr, &fc, K_FOREVER);
     if (ret != ISOTP_N_OK) {
         _Z_ERROR("ISO-TP: isotp_bind(rx=0x%x tx=0x%x) failed: %d", (unsigned)rx_id, (unsigned)tx_id, ret);
         __z_isotp_dev_release(can_dev);
