@@ -64,6 +64,20 @@ typedef struct _z_session_t {
      * would invert a lock order that already exists. */
     bool _mutex_transport_initialized;
     _z_mutex_rec_t _mutex_transport;
+
+    /* nano-ros issue 0924 — a failover is already running on this session.
+     *
+     * `_zp_unicast_failed` runs on the LEASE task, and the `_z_reopen` it ends
+     * with starts a NEW lease task before it returns. That new task begins
+     * counting immediately, so if the reopen takes longer than one lease
+     * period it expires and tears down the SAME transport while the first
+     * teardown is still inside it. Two concurrent teardowns of one transport
+     * wedge in lwIP's netconn close and the session never comes back: every
+     * publish returns `_Z_ERR_TRANSPORT_NOT_AVAILABLE` from then on.
+     *
+     * Guarded by `_mutex_transport`, which is the lock that already orders
+     * teardown against publishing. */
+    bool _reconnecting;
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 
     // Zenoh-pico is considering a single transport per session.

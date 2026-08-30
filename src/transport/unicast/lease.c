@@ -51,7 +51,10 @@ z_result_t _zp_unicast_send_keep_alive(_z_transport_unicast_t *ztu) {
 
 #if Z_FEATURE_MULTI_THREAD == 1 && Z_FEATURE_UNICAST_TRANSPORT == 1
 
-static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
+/* Returns false when another task already owns the failover — the caller must
+ * then keep looping instead of exiting. Otherwise it does not return at all
+ * (`_z_task_exit`). nano-ros issue 0924. */
+static bool _zp_unicast_failed(_z_transport_unicast_t *ztu) {
 #if Z_FEATURE_LIVELINESS == 1 && Z_FEATURE_SUBSCRIPTION == 1
     _z_liveliness_subscription_undeclare_all(_z_transport_common_get_session(&ztu->_common));
 #endif
@@ -96,12 +99,35 @@ static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
      * reopen that keeps failing keeps publishers erroring rather than blocking
      * on a link that is not there. */
     _z_session_t *zsp = _Z_RC_IS_NULL(&zs) ? NULL : _Z_RC_IN_VAL(&zs);
+
+    /* nano-ros issue 0924 — CLAIM the failover, or leave it to whoever holds
+     * it. `_z_reopen` below starts a NEW lease task before it returns, and that
+     * task begins counting immediately: if the reopen outlasts one lease
+     * period it expires and arrives here to tear down the SAME transport while
+     * this frame is still inside it. Two concurrent teardowns wedge in lwIP's
+     * netconn close and the session never comes back — every publish returns
+     * `-10` from then on.
+     *
+     * Measured: with a lease long enough that a reopen always finishes first,
+     * three freeze/kill outage cycles recover cleanly. With the lease alone
+     * shortened below the reopen time, on the same code, the very first outage
+     * wedges it — 227 failed publishes out of 247. The lease value decides how
+     * OFTEN this is hit; it is not what makes it possible. */
     if (zsp != NULL) {
         _z_session_transport_lock(zsp);
+        if (zsp->_reconnecting) {
+            /* Someone else owns the failover. Do NOT exit this task: it is a
+             * live lease task and the session will still need one if the
+             * reopen in flight succeeds. Go back to the loop and let the
+             * caller's `next_lease` reset. */
+            _z_session_transport_unlock(zsp);
+            _z_session_rc_drop(&zs);
+            return false;
+        }
+        zsp->_reconnecting = true;
         zsp->_tp._type = _Z_TRANSPORT_NONE;
         _z_session_transport_unlock(zsp);
     }
-
     _z_unicast_transport_close(ztu, _Z_CLOSE_EXPIRED);
     _z_unicast_transport_clear(ztu, true);
 
@@ -112,9 +138,17 @@ static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
     }
 #endif
 
+    /* Release the claim before this task leaves, so the lease task the reopen
+     * started can fail over in its turn if the link drops again. */
+    if (zsp != NULL) {
+        _z_session_transport_lock(zsp);
+        zsp->_reconnecting = false;
+        _z_session_transport_unlock(zsp);
+    }
     _z_session_rc_drop(&zs);
 
     _z_task_exit();
+    return true;
 }
 
 void *_zp_unicast_lease_task(void *ztu_arg) {
@@ -141,8 +175,10 @@ void *_zp_unicast_lease_task(void *ztu_arg) {
                 } else {
                     // THIS LOG STRING USED IN TEST, change with caution
                     _Z_INFO("Closing session because it has expired after %zums", ztu->_common._lease);
-                    _zp_unicast_failed(ztu);
-                    return 0;
+                    if (_zp_unicast_failed(ztu)) {
+                        return 0;
+                    }
+                    /* Another task owns the failover; stay alive and re-arm. */
                 }
                 next_lease = (int)ztu->_common._lease;
             }
@@ -154,8 +190,9 @@ void *_zp_unicast_lease_task(void *ztu_arg) {
                     if (_zp_unicast_send_keep_alive(ztu) < 0) {
                         // THIS LOG STRING USED IN TEST, change with caution
                         _Z_INFO("Send keep alive failed.");
-                        _zp_unicast_failed(ztu);
-                        return 0;
+                        if (_zp_unicast_failed(ztu)) {
+                            return 0;
+                        }
                     }
                 }
                 // Reset the keep alive parameters

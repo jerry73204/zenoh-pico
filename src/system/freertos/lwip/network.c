@@ -405,7 +405,30 @@ void _z_close_tcp(_z_sys_net_socket_t *sock) {
     _z_lwip_thread_init();
 
     if (sock->_socket >= 0) {
-        shutdown(sock->_socket, SHUT_RDWR);
+        /* nano-ros issue 0924 — ABORT the connection, do not shut it down
+         * gracefully.
+         *
+         * Every caller of this reaches it because the transport is already
+         * being torn down, and the commonest reason is that the PEER STOPPED
+         * ANSWERING. A graceful close is exactly wrong there: `shutdown()`
+         * makes lwIP send a FIN and wait for the peer to ACK it, and a peer
+         * that is wedged, frozen or gone never will. The lease task then parks
+         * in here forever, the session stays `_Z_TRANSPORT_NONE`, and every
+         * publish returns `-10` for the rest of the process's life.
+         *
+         * Measured with the router held under SIGSTOP: 247 publishes, 227 of
+         * them failures, delivery frozen from the first outage on and never
+         * recovering across repeated cycles.
+         *
+         * `SO_LINGER` with a zero timeout is the portable "abort now": the
+         * stack sends RST instead of FIN and `close()` returns immediately,
+         * waiting on nothing. Zenoh has already sent its own Close message at
+         * the protocol level by this point, so the graceful half of the
+         * handshake has served its purpose and the TCP-level courtesy buys
+         * nothing but a hang. If the option is rejected we still close, which
+         * is no worse than before. */
+        struct linger abort_now = {.l_onoff = 1, .l_linger = 0};
+        (void)setsockopt(sock->_socket, SOL_SOCKET, SO_LINGER, &abort_now, sizeof(abort_now));
         close(sock->_socket);
         sock->_socket = -1;
     }
