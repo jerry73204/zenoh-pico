@@ -133,13 +133,36 @@ void *z_realloc(void *ptr, size_t size) {
 void z_free(void *ptr) { vPortFree(ptr); }
 #endif /* !Z_FEATURE_NROS_PLATFORM_ALLOC */
 
+#if defined(ZENOH_FREERTOS_LWIP)
+#include "lwip/opt.h"
+#include "lwip/sockets.h"
+#endif
+
 #if Z_FEATURE_MULTI_THREAD == 1
 /*------------------ Thread ------------------*/
 static void z_task_wrapper(void *arg) {
     _z_task_t *task = (_z_task_t *)arg;
 
+#if defined(ZENOH_FREERTOS_LWIP) && LWIP_NETCONN_SEM_PER_THREAD == 1
+    /* nano-ros issue 0906 — every task that touches a socket needs its OWN
+     * netconn semaphore, and lwIP only ever READS the thread-local slot:
+     * `sys_arch_netconn_sem_get()` returns whatever is there, NULL included,
+     * and then waits on it forever. These tasks (read, lease) call recv, send
+     * and close, so without this the first operation that must WAIT never
+     * returns — measured, a lease teardown parked in `_z_link_free`.
+     *
+     * lwIP requires this whenever one netconn is used from several threads at
+     * once, which is exactly our shape: read task recv, app task send, lease
+     * task close. See `LWIP_NETCONN_FULLDUPLEX` in the board's lwipopts. */
+    lwip_socket_thread_init();
+#endif
+
     // Run the task function
     task->fun(task->arg);
+
+#if defined(ZENOH_FREERTOS_LWIP) && LWIP_NETCONN_SEM_PER_THREAD == 1
+    lwip_socket_thread_cleanup();
+#endif
 
     // Notify the joiner that the task has finished
     xEventGroupSetBits(task->join_event, 1);
