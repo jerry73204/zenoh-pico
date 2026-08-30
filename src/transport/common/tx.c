@@ -19,6 +19,7 @@
 #include "zenoh-pico/protocol/codec/network.h"
 #include "zenoh-pico/protocol/codec/transport.h"
 #include "zenoh-pico/protocol/definitions/transport.h"
+#include "zenoh-pico/session/utils.h"
 #include "zenoh-pico/transport/raweth/tx.h"
 #include "zenoh-pico/transport/transport.h"
 #include "zenoh-pico/transport/utils.h"
@@ -642,6 +643,19 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
     }
 #endif
     z_result_t ret = _Z_RES_OK;
+    /* nano-ros issue 0899 — hold the session's transport lifetime lock for the
+     * whole send. Everything below dereferences resources `_zp_unicast_failed`
+     * frees from the lease task; without it a publisher can be inside a
+     * transport that is being torn down under it. Uncontended in steady state:
+     * one recursive take per message, and the only other holder is a teardown,
+     * which is not a steady state.
+     *
+     * The lock must be the SESSION's — the transport cannot guard its own
+     * lifetime — which is why these two entry points take a `_z_session_t *`
+     * and `_z_send_t_msg` (a `_z_transport_t *`) does not: its callers are the
+     * lease and read tasks, and the teardown joins the read task before it
+     * frees anything. */
+    _z_session_transport_mutex_lock(zn);
     // Call transport function
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE: {
@@ -683,11 +697,25 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
             ret = _Z_ERR_TRANSPORT_NOT_AVAILABLE;
             break;
     }
+    _z_session_transport_mutex_unlock(zn);
     return ret;
 }
 
 z_result_t _z_send_n_batch(_z_session_t *zn, z_congestion_control_t cong_ctrl) {
     z_result_t ret = _Z_RES_OK;
+    /* nano-ros issue 0899 — hold the session's transport lifetime lock for the
+     * whole send. Everything below dereferences resources `_zp_unicast_failed`
+     * frees from the lease task; without it a publisher can be inside a
+     * transport that is being torn down under it. Uncontended in steady state:
+     * one recursive take per message, and the only other holder is a teardown,
+     * which is not a steady state.
+     *
+     * The lock must be the SESSION's — the transport cannot guard its own
+     * lifetime — which is why these two entry points take a `_z_session_t *`
+     * and `_z_send_t_msg` (a `_z_transport_t *`) does not: its callers are the
+     * lease and read tasks, and the teardown joins the read task before it
+     * frees anything. */
+    _z_session_transport_mutex_lock(zn);
     // Call transport function
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE:
@@ -714,5 +742,6 @@ z_result_t _z_send_n_batch(_z_session_t *zn, z_congestion_control_t cong_ctrl) {
             ret = _Z_ERR_TRANSPORT_NOT_AVAILABLE;
             break;
     }
+    _z_session_transport_mutex_unlock(zn);
     return ret;
 }

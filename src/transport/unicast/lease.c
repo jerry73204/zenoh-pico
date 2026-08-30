@@ -110,9 +110,15 @@ static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
         _z_connectivity_peer_event_data_clear(&disconnected_peer);
     }
 #endif
-#if Z_FEATURE_AUTO_RECONNECT == 1
+    /* nano-ros issue 0899 — upgrade the session ref UNCONDITIONALLY, not just
+     * under AUTO_RECONNECT: it is what keeps the session (and therefore the
+     * transport lifetime lock taken below) alive while the teardown drops the
+     * transport's own weak ref to it. */
     _z_session_rc_t zs_rc = _z_session_weak_upgrade(&ztu->_common._session);
-#endif
+
+    /* Join the read task BEFORE taking the lock, never while holding it: a
+     * message in flight can dispatch a user callback that publishes, and that
+     * publish now takes the same lock. */
     if (ztu->_common._read_task != NULL) {
         ztu->_common._read_task_running = false;
         _z_task_join(ztu->_common._read_task);
@@ -120,18 +126,53 @@ static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
     }
     ztu->_common._lease_task_running = false;
 
+    /* nano-ros issue 0899 — THE FIX, and it is a HANDSHAKE, not a critical
+     * section wrapped around the teardown.
+     *
+     * Everything below frees resources an application task can be inside:
+     * `_z_wbuf_clear` on `_wbuf`, `_z_mutex_drop` on `_mutex_tx`/`_mutex_rx`.
+     * The publisher must be kept out — but the lock must NOT be held across the
+     * teardown itself, because `_z_link_free` closes the socket and blocks in
+     * lwIP until the stack completes it. Holding it there DEADLOCKS: measured,
+     * the lease task parks in `_z_link_free` and the image goes quiet at the
+     * first or second lapse instead of asserting. Trading a crash for a hang is
+     * not a fix.
+     *
+     * So publish the INVALIDATION under the lock, and let go. `_z_send_n_msg`
+     * and `_z_send_n_batch` read `_tp._type` inside that same lock, so:
+     *
+     *   - while this take is held, no publisher is inside the transport;
+     *   - after the release, every publisher reads `_Z_TRANSPORT_NONE`, takes
+     *     the `default:` arm and returns `_Z_ERR_TRANSPORT_NOT_AVAILABLE`
+     *     without touching one freed byte.
+     *
+     * `_z_open` already sets `_type` to NONE on entry and restores it on
+     * success, so the window closes by itself when the reopen lands — and a
+     * reopen that keeps failing keeps publishers erroring rather than blocking
+     * on a link that is not there. */
+    _z_session_t *zsp = _Z_RC_IS_NULL(&zs_rc) ? NULL : _Z_RC_IN_VAL(&zs_rc);
+    if (zsp != NULL) {
+        _z_session_transport_mutex_lock(zsp);
+        zsp->_tp._type = _Z_TRANSPORT_NONE;
+        _z_session_transport_mutex_unlock(zsp);
+    }
+
+    /* NOT under `_mutex_transport`, deliberately -- upstream 1.8.0 wraps this
+     * pair in the lock and that is the measured lwIP deadlock described above.
+     * The handshake has already made it unnecessary: `_tp._type` is
+     * `_Z_TRANSPORT_NONE`, published under the lock, so every publisher now
+     * takes the `default:` arm without touching a freed byte. */
     _z_unicast_transport_close(ztu, _Z_CLOSE_EXPIRED);
-    _z_session_transport_mutex_lock(zs);
     _z_transport_clear(&zs->_tp, true);
-    _z_session_transport_mutex_unlock(zs);
 
 #if Z_FEATURE_AUTO_RECONNECT == 1
     z_result_t ret = _z_reopen(&zs_rc);
-    _z_session_rc_drop(&zs_rc);
     if (ret != _Z_RES_OK) {
         _Z_ERROR("Reopen failed: %i", ret);
     }
 #endif
+
+    _z_session_rc_drop(&zs_rc);
 
     _z_task_exit();
 }
