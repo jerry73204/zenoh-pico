@@ -72,6 +72,7 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
         _Z_ERROR_RETURN(ret);
     }
 #endif
+    zn->_reconnecting = false; /* nano-ros issue 0924 */
 #endif
     zn->_mode = Z_WHATAMI_CLIENT;
     zn->_tp._type = _Z_TRANSPORT_NONE;
