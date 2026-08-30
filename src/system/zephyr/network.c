@@ -979,19 +979,42 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
    not have to tear down; refuses a second, different device rather than
    quietly rebinding the one link the buffer can represent. */
 static bool _z_serial_rx_bind(const struct device *dev) {
-    if (_z_serial_rx_dev == dev) {
-        return true;
-    }
-    if (_z_serial_rx_dev != NULL) {
+    if (_z_serial_rx_dev != NULL && _z_serial_rx_dev != dev) {
         _Z_ERROR("serial RX already bound to another UART -- refusing to rebind");
         return false;
     }
-    ring_buf_init(&_z_serial_rx_ring, sizeof(_z_serial_rx_storage), _z_serial_rx_storage);
-    if (uart_irq_callback_user_data_set(dev, _z_serial_isr, NULL) != 0) {
-        _Z_ERROR("uart_irq_callback_user_data_set failed -- falling back to polled RX");
-        return false;
+
+    if (_z_serial_rx_dev == NULL) {
+        ring_buf_init(&_z_serial_rx_ring, sizeof(_z_serial_rx_storage), _z_serial_rx_storage);
+        if (uart_irq_callback_user_data_set(dev, _z_serial_isr, NULL) != 0) {
+            _Z_ERROR("uart_irq_callback_user_data_set failed -- falling back to polled RX");
+            return false;
+        }
+        _z_serial_rx_dev = dev;
     }
-    _z_serial_rx_dev = dev;
+
+    /* Re-arm on EVERY open, not just the first.
+     *
+     * `_z_open_serial_from_dev` runs `uart_configure()` immediately before this
+     * on every open, and a RECONNECT is an open. On the mcux LPUART that
+     * reinitialises the peripheral and clears the RX interrupt enable, while
+     * this function used to return early for an already-bound device -- so RX
+     * was armed on the first open and never again. One dropped session and the
+     * receiver was dead for the life of the image: the handshake would succeed,
+     * then not one further byte would arrive, the reader would time out once per
+     * second, and the transport would reconnect forever.
+     *
+     * Measured on the action-server image (on the 1.10 port, where the same bug
+     * exists in the file that replaced this one): 145 bytes received in total,
+     * 75 read timeouts, and a ring that never held more than 19 of its 1024
+     * bytes -- so this was never a buffer-capacity problem.
+     *
+     * Drop whatever the previous session left in the ring while re-arming. Those
+     * bytes belong to a transport that no longer exists, and feeding them to the
+     * new one desynchronises its COBS framing. */
+    ring_buf_reset(&_z_serial_rx_ring);
+    k_sem_reset(&_z_serial_rx_sem);
+    _z_serial_rx_ring_full = false;
     uart_irq_rx_enable(dev);
     return true;
 }
