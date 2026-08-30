@@ -43,6 +43,27 @@ typedef struct _z_session_t {
 #if Z_FEATURE_MULTI_THREAD == 1
     bool _mutex_inner_initialized;
     _z_mutex_t _mutex_inner;
+
+    /* nano-ros issue 0899 — the TRANSPORT LIFETIME lock.
+     *
+     * `_tp` is stored by value, so its memory is stable, but the resources it
+     * OWNS (the tx/rx mutexes, the write buffer, the link) are freed and
+     * rebuilt in place by `_zp_unicast_failed` when a lease lapses. That runs
+     * on the lease task while an application task can be inside the same
+     * transport publishing, which is a use-after-free: the publisher then
+     * either resets a cleared wbuf (an empty slice list trips
+     * `_z_wbuf_put`'s assert) or takes a deleted `_mutex_tx`.
+     *
+     * The lock CANNOT live in the transport — the thing being freed cannot
+     * guard its own lifetime — so it lives here, in the session that outlives
+     * every teardown. Recursive because a reopen re-enters the tx path to
+     * replay declarations while the teardown still holds it.
+     *
+     * `_mutex_inner` is not reusable for this: it guards the session's
+     * REGISTRIES and is held across RX dispatch, so making the tx path take it
+     * would invert a lock order that already exists. */
+    bool _mutex_transport_initialized;
+    _z_mutex_rec_t _mutex_transport;
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 
     // Zenoh-pico is considering a single transport per session.

@@ -59,6 +59,10 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
     zn->_mutex_inner_initialized = false;
     _Z_RETURN_IF_ERR(_z_mutex_init(&zn->_mutex_inner));
     zn->_mutex_inner_initialized = true;
+    /* nano-ros issue 0899 — the transport lifetime lock. */
+    zn->_mutex_transport_initialized = false;
+    _Z_RETURN_IF_ERR(_z_mutex_rec_init(&zn->_mutex_transport));
+    zn->_mutex_transport_initialized = true;
 #endif
     zn->_mode = Z_WHATAMI_CLIENT;
     zn->_tp._type = _Z_TRANSPORT_NONE;
@@ -114,6 +118,8 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
     if (ret != _Z_RES_OK) {
         zn->_mutex_inner_initialized = false;
         _z_mutex_drop(&zn->_mutex_inner);
+        zn->_mutex_transport_initialized = false;
+        _z_mutex_rec_drop(&zn->_mutex_transport);
         _Z_ERROR_RETURN(ret);
     }
 #endif
@@ -194,6 +200,10 @@ void _z_session_clear(_z_session_t *zn) {
     if (zn->_mutex_inner_initialized) {
         zn->_mutex_inner_initialized = false;
         _z_mutex_drop(&zn->_mutex_inner);
+    }
+    if (zn->_mutex_transport_initialized) {
+        zn->_mutex_transport_initialized = false;
+        _z_mutex_rec_drop(&zn->_mutex_transport);
     }
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 }

@@ -17,6 +17,7 @@
 #include "zenoh-pico/session/interest.h"
 #include "zenoh-pico/session/liveliness.h"
 #include "zenoh-pico/session/query.h"
+#include "zenoh-pico/session/utils.h"
 #include "zenoh-pico/system/common/platform.h"
 #include "zenoh-pico/transport/common/tx.h"
 #include "zenoh-pico/transport/transport.h"
@@ -54,9 +55,15 @@ static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
 #if Z_FEATURE_LIVELINESS == 1 && Z_FEATURE_SUBSCRIPTION == 1
     _z_liveliness_subscription_undeclare_all(_z_transport_common_get_session(&ztu->_common));
 #endif
-#if Z_FEATURE_AUTO_RECONNECT == 1
+    /* nano-ros issue 0899 — upgrade the session ref UNCONDITIONALLY, not just
+     * under AUTO_RECONNECT: it is what keeps the session (and therefore the
+     * transport lifetime lock taken below) alive while `_z_unicast_transport_
+     * clear` drops the transport's own weak ref to it. */
     _z_session_rc_t zs = _z_session_weak_upgrade(&ztu->_common._session);
-#endif
+
+    /* Join the read task BEFORE taking the lock, never while holding it: a
+     * message in flight can dispatch a user callback that publishes, and that
+     * publish now takes the same lock. */
     if (ztu->_common._read_task != NULL) {
         ztu->_common._read_task_running = false;
         _z_task_join(ztu->_common._read_task);
@@ -64,16 +71,48 @@ static void _zp_unicast_failed(_z_transport_unicast_t *ztu) {
     }
     ztu->_common._lease_task_running = false;
 
+    /* nano-ros issue 0899 — THE FIX, and it is a HANDSHAKE, not a critical
+     * section wrapped around the teardown.
+     *
+     * Everything below frees resources an application task can be inside:
+     * `_z_wbuf_clear` on `_wbuf`, `_z_mutex_drop` on `_mutex_tx`/`_mutex_rx`.
+     * The publisher must be kept out — but the lock must NOT be held across the
+     * teardown itself, because `_z_link_free` closes the socket and blocks in
+     * lwIP until the stack completes it. Holding it there DEADLOCKS: measured,
+     * the lease task parks in `_z_link_free` and the image goes quiet at the
+     * first or second lapse instead of asserting. Trading a crash for a hang is
+     * not a fix.
+     *
+     * So publish the INVALIDATION under the lock, and let go. `_z_send_n_msg`
+     * and `_z_send_n_batch` read `_tp._type` inside that same lock, so:
+     *
+     *   - while this take is held, no publisher is inside the transport;
+     *   - after the release, every publisher reads `_Z_TRANSPORT_NONE`, takes
+     *     the `default:` arm and returns `_Z_ERR_TRANSPORT_NOT_AVAILABLE`
+     *     without touching one freed byte.
+     *
+     * `_z_open` already sets `_type` to NONE on entry and restores it on
+     * success, so the window closes by itself when the reopen lands — and a
+     * reopen that keeps failing keeps publishers erroring rather than blocking
+     * on a link that is not there. */
+    _z_session_t *zsp = _Z_RC_IS_NULL(&zs) ? NULL : _Z_RC_IN_VAL(&zs);
+    if (zsp != NULL) {
+        _z_session_transport_lock(zsp);
+        zsp->_tp._type = _Z_TRANSPORT_NONE;
+        _z_session_transport_unlock(zsp);
+    }
+
     _z_unicast_transport_close(ztu, _Z_CLOSE_EXPIRED);
     _z_unicast_transport_clear(ztu, true);
 
 #if Z_FEATURE_AUTO_RECONNECT == 1
     z_result_t ret = _z_reopen(&zs);
-    _z_session_rc_drop(&zs);
     if (ret != _Z_RES_OK) {
         _Z_ERROR("Reopen failed: %i", ret);
     }
 #endif
+
+    _z_session_rc_drop(&zs);
 
     _z_task_exit();
 }
