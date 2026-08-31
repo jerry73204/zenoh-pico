@@ -267,8 +267,35 @@ void *_zp_unicast_lease_task(void *ztu_arg) {
             }
         }
 
-        // The keep alive and lease intervals are expressed in milliseconds
-        z_sleep_ms((size_t)interval);
+        // The keep alive and lease intervals are expressed in milliseconds.
+        //
+        // nano-ros issue 0959 — sleep in BOUNDED CHUNKS, not for the whole
+        // interval. `_zp_unicast_stop_lease_task` clears `_lease_task_running`
+        // and then JOINS, so a task asleep for the full interval makes teardown
+        // wait out whatever remains of it. That latency is `lease /
+        // Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, which nano-ros #0906 moved from
+        // 3.3 s to 20 s when it raised the lease to match the ROS router's
+        // keep-alive cadence — measured on one native test, 3.5 s -> 20.2 s,
+        // entirely in teardown.
+        //
+        // The loop already decrements by what it actually slept, so chunking is
+        // local: the schedule is unchanged, only the granularity at which the
+        // running flag is re-read. One extra wakeup per second on an otherwise
+        // idle task is not a cost worth measuring; a twenty-second join is.
+        {
+            size_t remaining = (size_t)interval;
+            while (remaining > 0 && ztu->_common._lease_task_running) {
+                size_t chunk = remaining > Z_TRANSPORT_LEASE_TASK_SLEEP_CHUNK_MS
+                                   ? (size_t)Z_TRANSPORT_LEASE_TASK_SLEEP_CHUNK_MS
+                                   : remaining;
+                z_sleep_ms(chunk);
+                remaining -= chunk;
+            }
+            // Account only for the time actually slept: a stop mid-interval
+            // exits the outer loop anyway, but leaving the counters honest
+            // keeps this correct if the flag is ever re-set.
+            interval = interval - (int)remaining;
+        }
 
         next_lease = next_lease - interval;
         next_keep_alive = next_keep_alive - interval;

@@ -152,6 +152,13 @@
 // nano-ros phase-282 (#145) — split tx locking: batch flush steals the wbuf
 // under _mutex_tx and writes the socket under _mutex_link_tx only, so
 // publishers append while a slow send is in flight. Default OFF.
+/* nano-ros issue 0959 — upper bound on one lease-task sleep, so stopping the
+ * task does not wait out a whole keep-alive interval. Default matches the
+ * pre-0906 teardown latency rather than the lease. */
+#ifndef Z_TRANSPORT_LEASE_TASK_SLEEP_CHUNK_MS
+#define Z_TRANSPORT_LEASE_TASK_SLEEP_CHUNK_MS 1000
+#endif
+
 #ifndef Z_FEATURE_TX_SPLIT_LOCK
 #define Z_FEATURE_TX_SPLIT_LOCK 0
 #endif
