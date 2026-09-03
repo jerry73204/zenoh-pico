@@ -113,6 +113,23 @@
 #ifndef Z_FEATURE_LINK_CAN
 #define Z_FEATURE_LINK_CAN 0
 #endif
+
+/* RFC-0083 — ISO-TP link transport, and the vendored isotp-c backend. Present
+ * in `config.h.in` since the link landed; never mirrored here, so this header
+ * and its template disagreed about three of OUR OWN features. Harmless in
+ * practice (an undefined macro is 0 in `#if`, which is the intended default,
+ * and every lane that wants them on passes `-D`), but a header that silently
+ * omits a feature it has is how the next reader concludes it does not exist. */
+#ifndef Z_FEATURE_LINK_ISOTP
+#define Z_FEATURE_LINK_ISOTP 0
+#endif
+#ifndef Z_FEATURE_LINK_ISOTP_VENDORED
+#define Z_FEATURE_LINK_ISOTP_VENDORED 0
+#endif
+/* Phase 115.B — runtime-pluggable user transport. */
+#ifndef Z_FEATURE_LINK_CUSTOM
+#define Z_FEATURE_LINK_CUSTOM 0
+#endif
 #ifndef Z_FEATURE_LINK_TLS
 #define Z_FEATURE_LINK_TLS 0
 #endif
