@@ -63,6 +63,28 @@
 #define Z_FEATURE_LOCAL_QUERYABLE @Z_FEATURE_LOCAL_QUERYABLE@
 #define Z_FEATURE_SESSION_CHECK @Z_FEATURE_SESSION_CHECK@
 #define Z_FEATURE_BATCHING @Z_FEATURE_BATCHING@
+
+/* nano-ros — knobs the patch line adds. They live HERE, not only in the
+ * generated `config.h`: CMake regenerates that file into the SOURCE tree
+ * (CMakeLists.txt `configure_file(config.h.in -> config.h)`), so anything
+ * written only into `config.h` is erased by the first cmake configure. It
+ * survived on the 1.7.2 line purely because nano-ros builds zenoh-pico through
+ * `zpico-sys`, which compiles the sources directly and never runs this
+ * CMakeLists -- so the loss only shows up for someone building upstream-style.
+ *
+ * phase-282 (#145) -- split tx locking: batch flush steals the wbuf under
+ * `_mutex_tx` and writes the socket under `_mutex_link_tx` only, so publishers
+ * append while a slow send is in flight. Default OFF. */
+#ifndef Z_FEATURE_TX_SPLIT_LOCK
+#define Z_FEATURE_TX_SPLIT_LOCK 0
+#endif
+
+/* nano-ros issue 0959 -- upper bound on one lease-task sleep, so stopping the
+ * task does not wait out a whole keep-alive interval. Default matches the
+ * pre-0906 teardown latency rather than the lease. */
+#ifndef Z_TRANSPORT_LEASE_TASK_SLEEP_CHUNK_MS
+#define Z_TRANSPORT_LEASE_TASK_SLEEP_CHUNK_MS 1000
+#endif
 #define Z_FEATURE_BATCH_TX_MUTEX @Z_FEATURE_BATCH_TX_MUTEX@
 #define Z_FEATURE_BATCH_PEER_MUTEX @Z_FEATURE_BATCH_PEER_MUTEX@
 #define Z_FEATURE_MATCHING @Z_FEATURE_MATCHING@
