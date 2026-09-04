@@ -63,7 +63,7 @@ z_result_t _z_socket_get_endpoints(const _z_sys_net_socket_t *sock, char *local,
     return _Z_RES_OK;
 }
 
-#elif defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_ZEPHYR)
+#elif defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_ZEPHYR) || defined(ZENOH_NUTTX)
 
 #include <stddef.h>
 
