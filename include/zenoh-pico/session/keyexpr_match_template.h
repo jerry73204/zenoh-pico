@@ -129,7 +129,23 @@ static inline const char *_z_keyexpr_get_next_verbatim_chunk(const char *begin, 
 #error "_ZP_KE_MATCH_TEMPLATE_INTERSECTS must be defined before including keyexpr_match_template.h"
 #endif
 
-#if _ZP_KE_MATCH_TEMPLATE_INTERSECTS == true
+/* nano-ros issue 1035 — `1`, not `true`.
+ *
+ * `true` is only guaranteed to be an integer constant expression where
+ * <stdbool.h> defines it as `1`. NuttX's exported header does not:
+ *
+ *     #define true  (bool)1        (nros-nuttx-export-arm/include/stdbool.h:79)
+ *
+ * so this line expands to `#if ... == (bool)1` and the preprocessor stops with
+ * "missing binary operator before token \"1\"". Every NuttX image using zenoh
+ * fails to build, because `session/keyexpr.c` includes this header twice (once
+ * per match mode) and it is new in 1.8.0.
+ *
+ * The callers still define the macro as `true`/`false`, which is fine: it is
+ * only the PREPROCESSOR comparison that needs an integer. Comparing against `1`
+ * is correct for both spellings on a conforming stdbool too, so this is not a
+ * NuttX-only workaround. */
+#if _ZP_KE_MATCH_TEMPLATE_INTERSECTS == 1
 #define _ZP_KE_MATCH_OP intersects
 #define _ZP_KE_MATCH_TYPE_INTERSECTS true
 #define _ZP_KE_MATCH_TYPE_INCLUDES false

@@ -562,9 +562,17 @@ z_result_t _z_declared_keyexpr_declare_non_wild_prefix(const _z_session_rc_t *zs
     }
 }
 
-#define _ZP_KE_MATCH_TEMPLATE_INTERSECTS true
+/* nano-ros issue 1035 — `1` / `0`, not `true` / `false`.
+ *
+ * This macro is consumed by a `#if` in the template header, so it must expand
+ * to an INTEGER CONSTANT EXPRESSION. `true` only is one where <stdbool.h>
+ * defines it as `1`; NuttX's exported header defines it as `(bool)1`, and a
+ * cast is illegal in a `#if`. Defining the macro here is the fix — changing
+ * only the comparison in the header is not, because the `true` still arrives
+ * through the expansion. */
+#define _ZP_KE_MATCH_TEMPLATE_INTERSECTS 1
 #include "zenoh-pico/session/keyexpr_match_template.h"
-#define _ZP_KE_MATCH_TEMPLATE_INTERSECTS false
+#define _ZP_KE_MATCH_TEMPLATE_INTERSECTS 0
 #include "zenoh-pico/session/keyexpr_match_template.h"
 
 bool _z_keyexpr_intersects(const _z_keyexpr_t *left, const _z_keyexpr_t *right) {
