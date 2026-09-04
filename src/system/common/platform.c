@@ -130,8 +130,22 @@ z_result_t _z_ip_port_to_endpoint(const uint8_t *address, size_t address_len, ui
 }
 #endif
 
+/* nano-ros issue 1035 — `ZENOH_NUTTX` belongs in this list.
+ *
+ * NuttX compiles `src/system/unix/network.c`, which defines
+ * `_z_socket_get_endpoints` at :137. Without the exclusion this fallback is
+ * compiled too and the link fails:
+ *
+ *     multiple definition of `_z_socket_get_endpoints';
+ *     network.c:(.text._z_socket_get_endpoints+0x0): first defined here
+ *
+ * Same class as issue 0775 in our own tree: an upstream guard that ENUMERATES
+ * platforms, and NuttX is missing from the enumeration. The other guards in
+ * this file (`:74`, `:105`) omit NuttX too, but they gate DEFINITIONS NuttX
+ * does not reference, so they are left alone deliberately — adding NuttX there
+ * would create the duplicate this one is removing. */
 #if !defined(ZENOH_WINDOWS) && !defined(ZENOH_LINUX) && !defined(ZENOH_MACOS) && !defined(ZENOH_BSD) && \
-    !defined(ZENOH_ZEPHYR)
+    !defined(ZENOH_ZEPHYR) && !defined(ZENOH_NUTTX)
 z_result_t _z_socket_get_endpoints(const _z_sys_net_socket_t *sock, char *local, size_t local_len, char *remote,
                                    size_t remote_len) {
     _ZP_UNUSED(sock);
