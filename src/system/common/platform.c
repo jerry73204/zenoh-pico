@@ -19,6 +19,21 @@
 #endif
 #if defined(ZENOH_FREERTOS_LWIP)
 #include "lwip/inet.h"
+/* nano-ros: lwIP defines INET6_ADDRSTRLEN only under LWIP_IPV6, but the
+ * platform arm below compiles `_z_ipv6_port_to_endpoint` for every listed
+ * platform INCLUDING ZENOH_FREERTOS_LWIP — so a v4-only lwIP fails to build on
+ * `char ip[INET6_ADDRSTRLEN]`. Arrived with upstream 04c6b1c7 ("Connectivity
+ * events and API", #1159) in 1.8.0; nano-ros ships LWIP_IPV6=0
+ * (nros-board-freertos/config/lwipopts.h).
+ *
+ * 46 is the standard value (RFC 4291 text form + NUL). Supplying it keeps the
+ * helper COMPILING rather than excising it: on a v4-only stack
+ * `inet_ntop(AF_INET6, ...)` returns NULL, which the function already treats as
+ * `_Z_ERR_GENERIC`. That is the honest runtime answer for a build with no IPv6,
+ * and it needs no call-site surgery. */
+#ifndef INET6_ADDRSTRLEN
+#define INET6_ADDRSTRLEN 46
+#endif
 #endif
 
 /* nano-ros: `_z_ipv6_port_to_endpoint` below uses INET6_ADDRSTRLEN
