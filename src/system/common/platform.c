@@ -21,6 +21,25 @@
 #include "lwip/inet.h"
 #endif
 
+/* nano-ros: `_z_ipv6_port_to_endpoint` below uses INET6_ADDRSTRLEN
+ * unconditionally, but no include above guarantees it.
+ *
+ * The case this was found on is FreeRTOS + lwIP, where `lwip/inet.h` defines
+ * INET_ADDRSTRLEN unconditionally and INET6_ADDRSTRLEN only under LWIP_IPV6.
+ * With IPv6 off the IPv4 helper compiles and only the IPv6 one fails, which is
+ * why this survived until an image needed this translation unit. The same hole
+ * exists for any platform that is neither ZENOH_LINUX/MACOS/BSD (which get
+ * `<arpa/inet.h>`) nor an IPv6-enabled lwIP.
+ *
+ * 46 is the value POSIX fixes: 45 characters for the longest IPv4-mapped form
+ * (`ffff:...:255.255.255.255`) plus the terminator. A fallback rather than a
+ * widened include guard, because a platform with no `<arpa/inet.h>` is exactly
+ * the case that has to work.
+ */
+#ifndef INET6_ADDRSTRLEN
+#define INET6_ADDRSTRLEN 46
+#endif
+
 #include "zenoh-pico/api/olv_macros.h"
 #include "zenoh-pico/utils/logging.h"
 
