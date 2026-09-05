@@ -16,7 +16,7 @@
 
 #include "zenoh-pico/config.h"
 
-#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_NUTTX)
 #include <arpa/inet.h>
 #endif
 #if defined(ZENOH_FREERTOS_LWIP)
@@ -49,7 +49,7 @@
 #endif
 
 #if defined(ZENOH_WINDOWS) || defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || \
-    defined(ZENOH_FREERTOS_LWIP) || defined(ZENOH_ZEPHYR)
+    defined(ZENOH_FREERTOS_LWIP) || defined(ZENOH_ZEPHYR) || defined(ZENOH_NUTTX)
 
 static z_result_t _z_ipv4_port_to_endpoint(const uint8_t *address, uint16_t port, char *dst, size_t dst_len) {
     char ip[INET_ADDRSTRLEN] = {0};
