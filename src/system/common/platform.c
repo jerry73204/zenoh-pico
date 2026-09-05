@@ -14,7 +14,7 @@
 #include "zenoh-pico/system/common/platform.h"
 
 #include <stdio.h>
-#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+#if defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_NUTTX)
 #include <arpa/inet.h>
 #endif
 #if defined(ZENOH_FREERTOS_LWIP)
@@ -91,7 +91,7 @@ z_result_t z_condvar_wait_until(z_loaned_condvar_t *cv, z_loaned_mutex_t *m, con
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 
 #if defined(ZENOH_WINDOWS) || defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || \
-    defined(ZENOH_FREERTOS_LWIP)
+    defined(ZENOH_FREERTOS_LWIP) || defined(ZENOH_NUTTX)
 static z_result_t _z_ipv4_port_to_endpoint(const uint8_t *address, uint16_t port, char *dst, size_t dst_len) {
     char ip[INET_ADDRSTRLEN] = {0};
     int written = -1;
@@ -122,7 +122,7 @@ static z_result_t _z_ipv6_port_to_endpoint(const uint8_t *address, uint16_t port
 #endif
 
 #if defined(ZENOH_WINDOWS) || defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || \
-    defined(ZENOH_FREERTOS_LWIP)
+    defined(ZENOH_FREERTOS_LWIP) || defined(ZENOH_NUTTX)
 z_result_t _z_ip_port_to_endpoint(const uint8_t *address, size_t address_len, uint16_t port, char *dst,
                                   size_t dst_len) {
     if (address == NULL || dst == NULL || dst_len == 0) {

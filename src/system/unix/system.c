@@ -21,11 +21,26 @@
 
 #include "zenoh-pico/utils/result.h"
 
-#if defined(ZENOH_LINUX)
+/* A CAPABILITY, not a platform: the randomness arms below need getrandom(2)
+ * from <sys/random.h>. Linux always has it, and so does NuttX -- which is why
+ * a NuttX build used to define ZENOH_LINUX, claiming to BE Linux in order to
+ * borrow one function. Naming the capability lets a port say what it has
+ * instead of what it resembles.
+ *
+ * Defined automatically for Linux so no existing -D flag has to change. */
+#if !defined(ZENOH_HAS_GETRANDOM) && defined(ZENOH_LINUX)
+#define ZENOH_HAS_GETRANDOM 1
+#endif
+
+#if defined(ZENOH_HAS_GETRANDOM)
 #include <sys/random.h>
+#endif
+#if defined(ZENOH_HAS_GETRANDOM) || defined(ZENOH_NUTTX)
 #include <sys/time.h>
-#elif defined(ZENOH_NUTTX)
-#include <sys/time.h>
+#endif
+/* Only the /dev/urandom fallback opens a file, and that arm compiles exactly
+ * when NuttX does NOT have getrandom. */
+#if defined(ZENOH_NUTTX) && !defined(ZENOH_HAS_GETRANDOM)
 #include <fcntl.h>
 #endif
 
@@ -38,7 +53,7 @@
 /*------------------ Random ------------------*/
 uint8_t z_random_u8(void) {
     uint8_t ret = 0;
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_HAS_GETRANDOM)
     while (getrandom(&ret, sizeof(uint8_t), 0) <= 0) {
         ZP_ASM_NOP;
     }
@@ -53,7 +68,7 @@ uint8_t z_random_u8(void) {
 
 uint16_t z_random_u16(void) {
     uint16_t ret = 0;
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_HAS_GETRANDOM)
     while (getrandom(&ret, sizeof(uint16_t), 0) <= 0) {
         ZP_ASM_NOP;
     }
@@ -68,7 +83,7 @@ uint16_t z_random_u16(void) {
 
 uint32_t z_random_u32(void) {
     uint32_t ret = 0;
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_HAS_GETRANDOM)
     while (getrandom(&ret, sizeof(uint32_t), 0) <= 0) {
         ZP_ASM_NOP;
     }
@@ -83,7 +98,7 @@ uint32_t z_random_u32(void) {
 
 uint64_t z_random_u64(void) {
     uint64_t ret = 0;
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_HAS_GETRANDOM)
     while (getrandom(&ret, sizeof(uint64_t), 0) <= 0) {
         ZP_ASM_NOP;
     }
@@ -99,7 +114,7 @@ uint64_t z_random_u64(void) {
 }
 
 void z_random_fill(void *buf, size_t len) {
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_HAS_GETRANDOM)
     while (getrandom(buf, len, 0) <= 0) {
         ZP_ASM_NOP;
     }
