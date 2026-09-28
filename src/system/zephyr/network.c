@@ -909,6 +909,37 @@ z_result_t _z_open_serial_from_pins(_z_sys_net_socket_t *sock, uint32_t txpin, u
     return ret;
 }
 
+/* What the serial link did, for a debugger to read while the image runs (the
+ * board's console is usually not wired: the UART belongs to zenoh). Counts only
+ * go up; nothing here changes behaviour. One instance, for the same reason the
+ * RX ring below has one: a session has one serial transport.
+ *
+ *   rx_bytes         bytes the ISR took off the wire (interrupt-driven RX only)
+ *   rx_frames        frames that decoded (COBS, length and CRC all good)
+ *   rx_bad_frames    frames that did not: bytes were lost or damaged, and the
+ *                    frame was dropped whole
+ *   rx_partial       a frame abandoned mid-way by the per-byte timeout
+ *   overruns         UART hardware overruns (the ISR was too late)
+ *   ring_overflows   ISR drains that did not fit the RX ring (the reader was
+ *                    too late); ring_high_water is the most the ring held
+ *   tx_bytes         bytes written, tx_frames frames written
+ *   tx_busy_cycles   k_cycle_get_32() cycles spent in the per-byte
+ *                    uart_poll_out loop: TX is a busy-wait, so this is CPU time
+ *                    the sending thread spent transmitting */
+typedef struct {
+    uint32_t rx_bytes;
+    uint32_t rx_frames;
+    uint32_t rx_bad_frames;
+    uint32_t rx_partial;
+    uint32_t overruns;
+    uint32_t ring_overflows;
+    uint32_t ring_high_water;
+    uint32_t tx_bytes;
+    uint32_t tx_frames;
+    uint32_t tx_busy_cycles;
+} _z_zephyr_serial_stats_t;
+volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
+
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
 
 /* ── issue 0852: interrupt-driven RX ────────────────────────────────────────
@@ -968,8 +999,14 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
             break;
         }
         uint32_t put = ring_buf_put(&_z_serial_rx_ring, chunk, (uint32_t)n);
+        _z_zephyr_serial_stats.rx_bytes += (uint32_t)n;
         if (put < (uint32_t)n) {
             _z_serial_rx_ring_full = true;
+            _z_zephyr_serial_stats.ring_overflows++;
+        }
+        uint32_t held = ring_buf_size_get(&_z_serial_rx_ring);
+        if (held > _z_zephyr_serial_stats.ring_high_water) {
+            _z_zephyr_serial_stats.ring_high_water = held;
         }
         k_sem_give(&_z_serial_rx_sem);
     }
@@ -1138,6 +1175,9 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
                No `k_yield()`, so no dependence on how long the executor holds
                the CPU -- that dependence was issue 0852. */
             if (_z_serial_rx_get(&raw_buf[i], deadline) != 0) {
+                if (i > 0) {
+                    _z_zephyr_serial_stats.rx_partial++;
+                }
                 z_free(raw_buf);
                 return SIZE_MAX;
             }
@@ -1170,6 +1210,7 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
            was actually damaged, which is what made the diagnosis provable. */
         int uart_err = uart_err_check(sock._serial);
         if (uart_err > 0 && (uart_err & UART_ERROR_OVERRUN) != 0) {
+            _z_zephyr_serial_stats.overruns++;
             _Z_ERROR("serial RX OVERRUN after %zu byte(s) -- frame will be dropped", rb);
         }
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
@@ -1195,6 +1236,11 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
         return SIZE_MAX;
     }
     size_t ret = _z_serial_msg_deserialize(raw_buf, rb, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
+    if (ret == SIZE_MAX) {
+        _z_zephyr_serial_stats.rx_bad_frames++;
+    } else {
+        _z_zephyr_serial_stats.rx_frames++;
+    }
 
     z_free(raw_buf);
     z_free(tmp_buf);
@@ -1223,9 +1269,13 @@ size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, c
         return ret;
     }
 
+    uint32_t t0 = k_cycle_get_32();
     for (size_t i = 0; i < ret; i++) {
         uart_poll_out(sock._serial, raw_buf[i]);
     }
+    _z_zephyr_serial_stats.tx_busy_cycles += k_cycle_get_32() - t0;
+    _z_zephyr_serial_stats.tx_bytes += (uint32_t)ret;
+    _z_zephyr_serial_stats.tx_frames++;
 
     z_free(raw_buf);
     z_free(tmp_buf);
