@@ -923,9 +923,16 @@ z_result_t _z_open_serial_from_pins(_z_sys_net_socket_t *sock, uint32_t txpin, u
  *   ring_overflows   ISR drains that did not fit the RX ring (the reader was
  *                    too late); ring_high_water is the most the ring held
  *   tx_bytes         bytes written, tx_frames frames written
- *   tx_busy_cycles   k_cycle_get_32() cycles spent in the per-byte
- *                    uart_poll_out loop: TX is a busy-wait, so this is CPU time
- *                    the sending thread spent transmitting */
+ *   tx_busy_cycles   k_cycle_get_32() cycles the sending thread spent in the
+ *                    send call. With interrupt-driven TX (below) that is time
+ *                    spent queueing, most of it asleep waiting for room; on the
+ *                    polled fallback it is the uart_poll_out busy-wait, i.e.
+ *                    CPU the sender burnt transmitting
+ *   framing_errors, noise_errors, parity_errors
+ *                    what uart_err_check reported besides overruns: a byte
+ *                    the UART received damaged (a baud-rate mismatch between
+ *                    the two ends shows up here first), so its frame fails
+ *                    its CRC and counts in rx_bad_frames too */
 typedef struct {
     uint32_t rx_bytes;
     uint32_t rx_frames;
@@ -937,6 +944,9 @@ typedef struct {
     uint32_t tx_bytes;
     uint32_t tx_frames;
     uint32_t tx_busy_cycles;
+    uint32_t framing_errors;
+    uint32_t noise_errors;
+    uint32_t parity_errors;
 } _z_zephyr_serial_stats_t;
 volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
 
@@ -966,6 +976,59 @@ volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
 #ifndef _Z_ZEPHYR_SERIAL_RX_RING_BYTES
 #define _Z_ZEPHYR_SERIAL_RX_RING_BYTES 1024
 #endif
+
+/* -- interrupt-driven TX (nano-ros issue 1534) -------------------------------
+ *
+ * The send path used to be `uart_poll_out` per byte: a busy-wait of 10.9 us a
+ * byte at 921,600 (86.8 us at 115200) in the SENDING thread, which on Zephyr
+ * is the tx-flush task or, while it registers the image's entities, main.
+ * Measured on an S32K344 at 921,600 with every contracted input flowing:
+ * 9.5 % of the CPU went to that loop, and at 115200 the island's join held
+ * the CPU for 620 ms without a context switch (nano-ros issue 1534).
+ *
+ * Now the sender copies the frame into a TX ring and the UART's TX interrupt
+ * drains it with `uart_fifo_fill`. A sender that finds the ring full SLEEPS
+ * on a semaphore the ISR gives, so while the wire is busy the CPU belongs to
+ * whoever else is ready. That returns the busy-wait's CPU; it does NOT on its
+ * own keep the read task fed: a CPU-bound thread above the read task starves
+ * it just as well (measured: with this change and main registering at
+ * k_thread 0, the RX ring still overflowed at the join with the read task
+ * READY). The read task has to outrank, or equal, every thread that can run
+ * while bytes arrive; that is the priority half of issue 1534.
+ *
+ * The sender is single by construction: zenoh-pico holds the transport's TX
+ * mutex across a send, so the ring has one producer (a thread) and one
+ * consumer (the ISR), which is what `ring_buf` needs without a lock. */
+#ifndef _Z_ZEPHYR_SERIAL_TX_RING_BYTES
+#define _Z_ZEPHYR_SERIAL_TX_RING_BYTES 256
+#endif
+/* How long a sender waits for the ISR to make room before it gives up on the
+   frame. The ring drains at line rate, so this only expires if TX interrupts
+   stopped altogether. */
+#ifndef _Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS
+#define _Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS 1000
+#endif
+
+/* Counters for the TX path, read by a debugger like `_z_zephyr_serial_stats`.
+ *   irq_bytes      bytes the TX ISR handed to the UART FIFO
+ *   waits          times a sender slept for room in the TX ring
+ *   timeouts       frames abandoned because no room appeared in time
+ *   ring_high_water the most the TX ring held */
+typedef struct {
+    uint32_t irq_bytes;
+    uint32_t waits;
+    uint32_t timeouts;
+    uint32_t ring_high_water;
+} _z_zephyr_serial_tx_stats_t;
+volatile _z_zephyr_serial_tx_stats_t _z_zephyr_serial_tx_stats;
+
+static uint8_t _z_serial_tx_storage[_Z_ZEPHYR_SERIAL_TX_RING_BYTES];
+static struct ring_buf _z_serial_tx_ring;
+static K_SEM_DEFINE(_z_serial_tx_sem, 0, 1);
+/* Set only once TX interrupts are known to work on the bound device; until
+   then (and on a device whose driver has no TX interrupt) the polled path is
+   used. */
+static bool _z_serial_tx_irq = false;
 
 static uint8_t _z_serial_rx_storage[_Z_ZEPHYR_SERIAL_RX_RING_BYTES];
 static struct ring_buf _z_serial_rx_ring;
@@ -1010,6 +1073,31 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
         }
         k_sem_give(&_z_serial_rx_sem);
     }
+
+    /* TX: refill the FIFO from the ring while the UART has room; with the ring
+       empty, stop the TX interrupt (TDRE is level-triggered and would
+       otherwise fire forever). The thread re-enables it after it puts bytes.
+       Single core, and this runs with the thread preempted, so "found empty"
+       and "disabled" cannot be split by a put. */
+    while (uart_irq_tx_ready(dev)) {
+        uint8_t *data;
+        uint32_t n = ring_buf_get_claim(&_z_serial_tx_ring, &data, _Z_ZEPHYR_SERIAL_TX_RING_BYTES);
+        if (n == 0u) {
+            (void)ring_buf_get_finish(&_z_serial_tx_ring, 0);
+            uart_irq_tx_disable(dev);
+            break;
+        }
+        int w = uart_fifo_fill(dev, data, (int)n);
+        if (w < 0) {
+            w = 0;
+        }
+        (void)ring_buf_get_finish(&_z_serial_tx_ring, (uint32_t)w);
+        _z_zephyr_serial_tx_stats.irq_bytes += (uint32_t)w;
+        k_sem_give(&_z_serial_tx_sem);
+        if (w == 0) {
+            break;
+        }
+    }
 }
 
 /* Attach the ISR to `dev`. Idempotent for the SAME device so a reconnect does
@@ -1023,6 +1111,7 @@ static bool _z_serial_rx_bind(const struct device *dev) {
 
     if (_z_serial_rx_dev == NULL) {
         ring_buf_init(&_z_serial_rx_ring, sizeof(_z_serial_rx_storage), _z_serial_rx_storage);
+        ring_buf_init(&_z_serial_tx_ring, sizeof(_z_serial_tx_storage), _z_serial_tx_storage);
         if (uart_irq_callback_user_data_set(dev, _z_serial_isr, NULL) != 0) {
             _Z_ERROR("uart_irq_callback_user_data_set failed -- falling back to polled RX");
             return false;
@@ -1053,6 +1142,14 @@ static bool _z_serial_rx_bind(const struct device *dev) {
     k_sem_reset(&_z_serial_rx_sem);
     _z_serial_rx_ring_full = false;
     uart_irq_rx_enable(dev);
+    /* The same reasoning for TX: `uart_configure()` cleared the TX interrupt
+       enable, and bytes a previous session left in the ring belong to a
+       transport that no longer exists. Nothing is sending now (the transport
+       is being opened), so the reset cannot race a producer. */
+    uart_irq_tx_disable(dev);
+    ring_buf_reset(&_z_serial_tx_ring);
+    k_sem_reset(&_z_serial_tx_sem);
+    _z_serial_tx_irq = true;
     return true;
 }
 
@@ -1073,6 +1170,36 @@ static int _z_serial_rx_get(uint8_t *out, int64_t deadline) {
            the ring, and a timeout here is not by itself an error. */
         (void)k_sem_take(&_z_serial_rx_sem, K_MSEC((uint32_t)remaining));
     }
+}
+
+/* Queue `len` bytes for the TX ISR, sleeping while the ring is full. Returns
+   0 when every byte is queued, -1 if no room appeared for
+   _Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS (TX interrupts stopped). Returning with bytes
+   still queued is correct: the next frame queues behind them, and COBS
+   framing does not care when a byte leaves. */
+static int _z_serial_tx_put(const struct device *dev, const uint8_t *data, size_t len) {
+    size_t done = 0;
+    while (done < len) {
+        uint32_t put = ring_buf_put(&_z_serial_tx_ring, &data[done], (uint32_t)(len - done));
+        done += put;
+        uint32_t held = ring_buf_size_get(&_z_serial_tx_ring);
+        if (held > _z_zephyr_serial_tx_stats.ring_high_water) {
+            _z_zephyr_serial_tx_stats.ring_high_water = held;
+        }
+        uart_irq_tx_enable(dev);
+        if (done < len) {
+            _z_zephyr_serial_tx_stats.waits++;
+            /* A "room was made" hint, like the RX sem: re-check the ring on
+               every wake. A stale give from an earlier drain only costs one
+               extra loop. */
+            if (k_sem_take(&_z_serial_tx_sem, K_MSEC(_Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS)) != 0 &&
+                ring_buf_space_get(&_z_serial_tx_ring) == 0u) {
+                _z_zephyr_serial_tx_stats.timeouts++;
+                return -1;
+            }
+        }
+    }
+    return 0;
 }
 
 #endif /* CONFIG_UART_INTERRUPT_DRIVEN */
@@ -1213,6 +1340,17 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
             _z_zephyr_serial_stats.overruns++;
             _Z_ERROR("serial RX OVERRUN after %zu byte(s) -- frame will be dropped", rb);
         }
+        if (uart_err > 0) {
+            if ((uart_err & UART_ERROR_FRAMING) != 0) {
+                _z_zephyr_serial_stats.framing_errors++;
+            }
+            if ((uart_err & UART_ERROR_NOISE) != 0) {
+                _z_zephyr_serial_stats.noise_errors++;
+            }
+            if ((uart_err & UART_ERROR_PARITY) != 0) {
+                _z_zephyr_serial_stats.parity_errors++;
+            }
+        }
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
         /* A DIFFERENT loss from the one above, and worth keeping apart: the
            hardware kept up and our ring did not, which says the ring is too
@@ -1270,8 +1408,24 @@ size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, c
     }
 
     uint32_t t0 = k_cycle_get_32();
-    for (size_t i = 0; i < ret; i++) {
-        uart_poll_out(sock._serial, raw_buf[i]);
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN)
+    if (_z_serial_tx_irq && _z_serial_rx_dev == sock._serial) {
+        /* tx_busy_cycles now counts the time the sender spent QUEUEING,
+           sleeping included -- no longer CPU burnt, since a waiting sender
+           is off the CPU. */
+        if (_z_serial_tx_put(sock._serial, raw_buf, ret) != 0) {
+            _Z_ERROR("serial TX stalled: no room in the TX ring for %u ms", (unsigned)_Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS);
+            _z_zephyr_serial_stats.tx_busy_cycles += k_cycle_get_32() - t0;
+            z_free(raw_buf);
+            z_free(tmp_buf);
+            return SIZE_MAX;
+        }
+    } else
+#endif
+    {
+        for (size_t i = 0; i < ret; i++) {
+            uart_poll_out(sock._serial, raw_buf[i]);
+        }
     }
     _z_zephyr_serial_stats.tx_busy_cycles += k_cycle_get_32() - t0;
     _z_zephyr_serial_stats.tx_bytes += (uint32_t)ret;
