@@ -508,16 +508,28 @@ void _z_flush_interest(_z_session_t *zn) {
 z_result_t _z_interest_process_declare_final(_z_session_t *zn, uint32_t id, _z_transport_peer_common_t *peer) {
     _z_interest_msg_t msg = {.type = _Z_INTEREST_MSG_TYPE_FINAL, .id = id};
     // Retrieve interest
+    /* nano-ros: take a REFERENCE under the lock, not a pointer into the list.
+     * `__unsafe_z_get_interest_by_id` returns the list node's own rc, and an
+     * undeclare on another thread (`_z_write_filter_clear` ->
+     * `_z_remove_interest` -> `_z_unregister_interest`) frees that node the
+     * moment the lock is released -- the read task then called the write
+     * filter's callback with a freed interest and a NULL context (SIGSEGV in
+     * `_z_write_filter_mutex_lock(ctx=0x0)`, measured churning publishers
+     * across a reconnect). The clone keeps the interest and its argument alive
+     * for the callback, the way `__z_get_interest_by_key_and_flags` already
+     * does for declares. */
     _Z_RETURN_IF_ERR(_z_session_mutex_lock_if_open(zn));
-    _z_session_interest_rc_t *intr = __unsafe_z_get_interest_by_id(zn, id);
+    _z_session_interest_rc_t *found = __unsafe_z_get_interest_by_id(zn, id);
+    _z_session_interest_rc_t intr = found == NULL ? _z_session_interest_rc_null() : _z_session_interest_rc_clone(found);
     _z_session_mutex_unlock(zn);
-    if (intr == NULL) {
+    if (_Z_RC_IS_NULL(&intr)) {
         return _Z_RES_OK;
     }
     // Trigger callback
-    if (_Z_RC_IN_VAL(intr)->_callback != NULL) {
-        _Z_RC_IN_VAL(intr)->_callback(&msg, peer, _Z_RC_IN_VAL(&_Z_RC_IN_VAL(intr)->_arg));
+    if (_Z_RC_IN_VAL(&intr)->_callback != NULL) {
+        _Z_RC_IN_VAL(&intr)->_callback(&msg, peer, _Z_RC_IN_VAL(&_Z_RC_IN_VAL(&intr)->_arg));
     }
+    _z_session_interest_rc_drop(&intr);
     return _Z_RES_OK;
 }
 
