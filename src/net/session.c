@@ -280,17 +280,34 @@ z_result_t _z_reopen(_z_session_rc_t *zn) {
 #endif
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 
-        if (ret == _Z_RES_OK && !_z_network_message_slist_is_empty(zs->_declaration_cache)) {
+        if (ret == _Z_RES_OK) {
+            /* nano-ros issue 1749 -- replay the cache under `_mutex_transport`,
+             * the lock `_z_cache_declaration` / `_z_prune_declaration` take.
+             * This walk runs on the LEASE task while application threads
+             * declare and undeclare; unlocked, a prune freed the node being
+             * encoded here (measured: heap-use-after-free in
+             * `_z_declare_encode` under `_z_reopen`). Each send below takes the
+             * same recursive lock again.
+             *
+             * A send that fails ends the replay instead of retrying the same
+             * message forever: retrying under this lock would hang every
+             * declare and every publisher behind a dead link. The link is gone
+             * again, so the lease task this reopen just started fails over in
+             * its turn and replays from the top. */
+            _z_session_transport_mutex_lock(zs);
             _z_network_message_slist_t *iter = zs->_declaration_cache;
             while (iter != NULL) {
                 _z_network_message_t *n_msg = _z_network_message_slist_value(iter);
                 ret = _z_send_n_msg(zs, n_msg, Z_RELIABILITY_RELIABLE, Z_CONGESTION_CONTROL_BLOCK, NULL);
                 if (ret != _Z_RES_OK) {
                     _Z_DEBUG("Send message during reopen failed: %i", ret);
-                    continue;
+                    break;
                 }
-
                 iter = _z_network_message_slist_next(iter);
+            }
+            _z_session_transport_mutex_unlock(zs);
+            if (ret != _Z_RES_OK) {
+                return ret;
             }
         }
     } while (ret != _Z_RES_OK);
@@ -298,11 +315,21 @@ z_result_t _z_reopen(_z_session_rc_t *zn) {
     return ret;
 }
 
+/* nano-ros issue 1749 -- `_declaration_cache` is guarded by `_mutex_transport`.
+ *
+ * Why that lock and not a new one: every caller of `_z_cache_declaration` and
+ * `_z_prune_declaration` has JUST returned from `_z_send_n_msg` in the same
+ * frame, and `_z_send_n_msg` takes `_mutex_transport`. So whatever a caller
+ * holds, it already takes this lock under it; taking it again here adds no
+ * lock-order edge that did not exist. `_z_reopen`'s replay holds it across the
+ * walk and its sends, which take it recursively. */
 void _z_cache_declaration(_z_session_t *zs, const _z_network_message_t *n_msg) {
     if (_z_config_is_empty(&zs->_config)) {
         return;
     }
+    _z_session_transport_mutex_lock(zs);
     zs->_declaration_cache = _z_network_message_slist_push_back(zs->_declaration_cache, n_msg);
+    _z_session_transport_mutex_unlock(zs);
 }
 
 #define _Z_CACHE_DECLARATION_UNDECLARE_FILTER(tp)                                                                     \
@@ -323,6 +350,7 @@ static bool _z_cache_declaration_undeclare_filter_interest(const _z_network_mess
 }
 
 void _z_prune_declaration(_z_session_t *zs, const _z_network_message_t *n_msg) {
+    _z_session_transport_mutex_lock(zs);  // nano-ros issue 1749, see `_z_cache_declaration`
 #ifdef Z_BUILD_DEBUG
     size_t cnt_before = _z_network_message_slist_len(zs->_declaration_cache);
 #endif
@@ -357,12 +385,14 @@ void _z_prune_declaration(_z_session_t *zs, const _z_network_message_t *n_msg) {
             break;
         default:
             _Z_ERROR("Invalid net message for _z_prune_declaration: %i", n_msg->_tag);
+            _z_session_transport_mutex_unlock(zs);
             return;
     };
 #ifdef Z_BUILD_DEBUG
     size_t cnt_after = _z_network_message_slist_len(zs->_declaration_cache);
     assert(cnt_before == cnt_after + 1);
 #endif
+    _z_session_transport_mutex_unlock(zs);
 }
 #endif  // Z_FEATURE_AUTO_RECONNECT == 1
 
