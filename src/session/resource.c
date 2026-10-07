@@ -53,7 +53,11 @@ void _z_resource_free(_z_resource_t **res) {
 }
 
 /*------------------ Entity ------------------*/
-uint32_t _z_get_entity_id(_z_session_t *zn) { return zn->_entity_id++; }
+uint32_t _z_get_entity_id(_z_session_t *zn) {
+    // nano-ros issue 1749 -- see `_z_session_t::_entity_id`. Ids are 32-bit on
+    // the wire, so truncating wraps exactly as `uint32_t++` did.
+    return (uint32_t)_z_atomic_size_fetch_add(&zn->_entity_id, 1, _z_memory_order_relaxed);
+}
 
 uint16_t _z_get_resource_id(_z_session_t *zn) { return zn->_resource_id++; }
 

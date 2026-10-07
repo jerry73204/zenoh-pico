@@ -135,8 +135,11 @@ typedef struct _z_session_t {
     _z_id_t _local_zid;
 
     // Session counters
-    uint16_t _resource_id;
-    uint32_t _entity_id;
+    uint16_t _resource_id;  // guarded by `_mutex_inner` (`_z_register_resource`)
+    /* nano-ros issue 1749 -- atomic, because every declare draws one and no
+     * single session lock is held on all of those paths: concurrent declares
+     * drew the SAME id from a plain `_entity_id++`. */
+    _z_atomic_size_t _entity_id;
     _z_zint_t _query_id;
     _z_zint_t _interest_id;
     _z_ntp64_t _last_timestamp;
