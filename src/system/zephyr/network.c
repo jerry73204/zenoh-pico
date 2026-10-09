@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 #if defined(CONFIG_NET_SOCKETS)
 #include <sys/socket.h>
 #endif
@@ -932,7 +933,11 @@ z_result_t _z_open_serial_from_pins(_z_sys_net_socket_t *sock, uint32_t txpin, u
  *                    what uart_err_check reported besides overruns: a byte
  *                    the UART received damaged (a baud-rate mismatch between
  *                    the two ends shows up here first), so its frame fails
- *                    its CRC and counts in rx_bad_frames too */
+ *                    its CRC and counts in rx_bad_frames too
+ *   rx_wakes         times the reader woke on the RX semaphore (interrupt-
+ *                    driven RX). About one per frame since the reader waits
+ *                    for a frame delimiter; it used to be one per ISR, i.e.
+ *                    per byte or two */
 typedef struct {
     uint32_t rx_bytes;
     uint32_t rx_frames;
@@ -947,6 +952,7 @@ typedef struct {
     uint32_t framing_errors;
     uint32_t noise_errors;
     uint32_t parity_errors;
+    uint32_t rx_wakes;
 } _z_zephyr_serial_stats_t;
 volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
 
@@ -976,6 +982,29 @@ volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
 #ifndef _Z_ZEPHYR_SERIAL_RX_RING_BYTES
 #define _Z_ZEPHYR_SERIAL_RX_RING_BYTES 1024
 #endif
+
+/* -- the reader wakes once per FRAME, not once per byte (nano-ros I10) -----
+ *
+ * The ISR used to give the RX semaphore on every FIFO drain, and the reader
+ * took the ring ONE BYTE per loop, with a `k_uptime_get` and a
+ * `uart_err_check` driver call per byte. At 921,600 baud a drain carries one
+ * or two bytes (a byte is 10.9 us and the ISR runs about 7 us), so every
+ * byte cost the reader a wake, two context switches and that per-byte
+ * bookkeeping: about 6.6 us of reader CPU per wake on an S32K344 at 160 MHz,
+ * which with the ISR's own time is the whole CPU. The reader runs in the
+ * transport's read band, above the executor (issue 1534 requires that), so
+ * for as long as a frame was on the wire -- 11.5 ms for a 1 KB
+ * kinematic_state -- the executor could not run: its release was late by the
+ * frame's wire time (measured: 13-19 ms late on a 10 ms spin).
+ *
+ * Now the ISR gives the semaphore only when a drain carried a frame
+ * delimiter (0x00, the COBS frame end) or the ring is half full (a frame
+ * longer than half the ring must not overflow it while the reader sleeps),
+ * and the reader moves whole runs out of the ring with `ring_buf_get_claim`
+ * up to and including the delimiter. Its CPU per frame is now the copy and
+ * the decode, not the wire time, and between frames it sleeps. The receive
+ * timeout keeps its meaning: the link quiet for _Z_ZEPHYR_SERIAL_TIMEOUT_MS
+ * (counted from the last byte the reader saw) abandons the frame. */
 
 /* -- interrupt-driven TX (nano-ros issue 1534) -------------------------------
  *
@@ -1071,7 +1100,13 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
         if (held > _z_zephyr_serial_stats.ring_high_water) {
             _z_zephyr_serial_stats.ring_high_water = held;
         }
-        k_sem_give(&_z_serial_rx_sem);
+        /* Wake the reader for a whole frame, not for a byte (see the note at
+           the RX ring). A full ring wakes it too: it may be holding the end
+           of a frame it cannot see yet. */
+        if (put < (uint32_t)n || memchr(chunk, 0x00, (size_t)n) != NULL ||
+            held >= (uint32_t)(_Z_ZEPHYR_SERIAL_RX_RING_BYTES / 2)) {
+            k_sem_give(&_z_serial_rx_sem);
+        }
     }
 
     /* TX: refill the FIFO from the ring while the UART has room; with the ring
@@ -1093,7 +1128,14 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
         }
         (void)ring_buf_get_finish(&_z_serial_tx_ring, (uint32_t)w);
         _z_zephyr_serial_tx_stats.irq_bytes += (uint32_t)w;
-        k_sem_give(&_z_serial_tx_sem);
+        /* The same rule as RX: wake a waiting sender when there is room for a
+           RUN of bytes, not after every FIFO's worth. Giving per fill woke the
+           sender every few bytes, two context switches each, in the band above
+           the executor. Half the ring keeps the wire busy: the sender refills
+           while the other half drains. */
+        if (ring_buf_space_get(&_z_serial_tx_ring) >= (uint32_t)(_Z_ZEPHYR_SERIAL_TX_RING_BYTES / 2)) {
+            k_sem_give(&_z_serial_tx_sem);
+        }
         if (w == 0) {
             break;
         }
@@ -1153,22 +1195,42 @@ static bool _z_serial_rx_bind(const struct device *dev) {
     return true;
 }
 
-/* One byte from the ring, waiting up to `deadline` (absolute k_uptime_get ms).
-   Returns 0 on success, -1 on timeout. */
-static int _z_serial_rx_get(uint8_t *out, int64_t deadline) {
+/* One frame from the ring: bytes up to and including the first 0x00, or
+   `cap` bytes if no delimiter came first (the byte loop's truncation, kept).
+   Bytes after the delimiter stay in the ring for the next frame. Returns the
+   count moved into `buf`, and sets *timed_out when the link went quiet for
+   `timeout_ms` (since the last byte seen) before the frame ended. */
+static size_t _z_serial_rx_frame(uint8_t *buf, size_t cap, uint32_t timeout_ms, bool *timed_out) {
+    size_t n = 0;
+    int64_t deadline = k_uptime_get() + (int64_t)timeout_ms;
+    *timed_out = false;
     for (;;) {
-        if (ring_buf_get(&_z_serial_rx_ring, out, 1) == 1) {
-            return 0;
+        uint8_t *run = NULL;
+        uint32_t avail = ring_buf_get_claim(&_z_serial_rx_ring, &run, (uint32_t)(cap - n));
+        if (avail > 0u) {
+            const uint8_t *end = (const uint8_t *)memchr(run, 0x00, avail);
+            uint32_t take = (end != NULL) ? (uint32_t)(end - run) + 1u : avail;
+            memcpy(&buf[n], run, take);
+            (void)ring_buf_get_finish(&_z_serial_rx_ring, take);
+            n += take;
+            if (end != NULL || n >= cap) {
+                return n;
+            }
+            /* Progress: the quiet-link timeout counts from here. The claim may
+               have stopped at the ring's wrap, so look again before sleeping. */
+            deadline = k_uptime_get() + (int64_t)timeout_ms;
+            continue;
         }
+        (void)ring_buf_get_finish(&_z_serial_rx_ring, 0u);
         int64_t remaining = deadline - k_uptime_get();
         if (remaining <= 0) {
-            return -1;
+            *timed_out = true;
+            return n;
         }
-        /* The sem is a "something arrived" hint, not a count of bytes: the ISR
-           gives it once per FIFO drain, which may carry many bytes or race a
-           reader that already took them. So a wake is always re-checked against
-           the ring, and a timeout here is not by itself an error. */
+        /* A "frame end or half a ring arrived" hint, not a count: a wake is
+           re-checked against the ring, and a stale give costs one loop. */
         (void)k_sem_take(&_z_serial_rx_sem, K_MSEC((uint32_t)remaining));
+        _z_zephyr_serial_stats.rx_wakes++;
     }
 }
 
@@ -1266,12 +1328,55 @@ z_result_t _z_listen_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint3
 
 void _z_close_serial(_z_sys_net_socket_t *sock) {}
 
-/* Per-byte read timeout. Long enough for a peer to answer a handshake, short
-   enough that a lost frame is recoverable rather than a permanent hang. */
+/* Receive timeout: the link quiet this long (per byte on the polled path,
+   since the last byte the reader saw on the interrupt-driven one). Long enough
+   for a peer to answer a handshake, short enough that a lost frame is
+   recoverable rather than a permanent hang. */
 #ifndef _Z_ZEPHYR_SERIAL_TIMEOUT_MS
 #define _Z_ZEPHYR_SERIAL_TIMEOUT_MS 1000
 #endif
 
+
+/* issue 0852 -- an overrun is a LOST BYTE, and it used to be silent.
+   `uart_poll_in` reports "no character available", never "a character was
+   destroyed before you asked", so a receiver that only checks its return value
+   cannot tell a quiet link from a link it is failing to keep up with. That
+   indistinguishability is what let this hide behind six wrong hypotheses,
+   ending in a router bug report (issue 0848) that was wrong in every
+   particular.
+
+   The flags are sticky until read, so reading them once the frame is in hand
+   still attributes a loss to the frame that was actually damaged. The polled
+   path reads them per byte, as it always did; the interrupt-driven path reads
+   them once per frame (a driver call per byte was part of the per-byte cost,
+   see the note at the RX ring). */
+static void _z_serial_rx_check_errors(const _z_sys_net_socket_t sock, size_t rb) {
+    int uart_err = uart_err_check(sock._serial);
+    if (uart_err > 0 && (uart_err & UART_ERROR_OVERRUN) != 0) {
+        _z_zephyr_serial_stats.overruns++;
+        _Z_ERROR("serial RX OVERRUN after %zu byte(s) -- frame will be dropped", rb);
+    }
+    if (uart_err > 0) {
+        if ((uart_err & UART_ERROR_FRAMING) != 0) {
+            _z_zephyr_serial_stats.framing_errors++;
+        }
+        if ((uart_err & UART_ERROR_NOISE) != 0) {
+            _z_zephyr_serial_stats.noise_errors++;
+        }
+        if ((uart_err & UART_ERROR_PARITY) != 0) {
+            _z_zephyr_serial_stats.parity_errors++;
+        }
+    }
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN)
+    /* A DIFFERENT loss from the one above, and worth keeping apart: the
+       hardware kept up and our ring did not, which says the ring is too small
+       or the reader is too slow, not that the ISR is too late. */
+    if (_z_serial_rx_ring_full) {
+        _z_serial_rx_ring_full = false;
+        _Z_ERROR("serial RX ring overflowed -- raise _Z_ZEPHYR_SERIAL_RX_RING_BYTES");
+    }
+#endif
+}
 
 size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len) {
     uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
@@ -1285,33 +1390,38 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
 #else
     const bool irq_rx = false;
 #endif
-    for (size_t i = 0; i < _Z_SERIAL_MAX_COBS_BUF_SIZE; i++) {
-        int res = -1;
-        /* Bounded per-byte wait, as the flipper port does with a 200 ms
-           furi_stream_buffer_receive() and the unix port with SO_RCVTIMEO: on
-           expiry return SIZE_MAX, which is the contract callers already handle
-           (_z_read_exact_serial breaks on it). Unbounded was the real defect --
-           _z_connect_serial sends one INIT and then blocks here forever, so a
-           lost INIT could never be retried and the link was unrecoverable.
-           Yield rather than sleep between polls: at 115200 a byte is 87 us and
-           the shortest z_sleep_ms(1) blocks a whole tick, overrunning the UART. */
-        int64_t deadline = k_uptime_get() + (int64_t)_Z_ZEPHYR_SERIAL_TIMEOUT_MS;
+    /* Bounded wait, as the flipper port does with a 200 ms
+       furi_stream_buffer_receive() and the unix port with SO_RCVTIMEO: on
+       expiry return SIZE_MAX, which is the contract callers already handle
+       (_z_read_exact_serial breaks on it). Unbounded was the real defect --
+       _z_connect_serial sends one INIT and then blocks here forever, so a lost
+       INIT could never be retried and the link was unrecoverable. */
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
-        if (irq_rx) {
-            /* The ISR already took the byte off the wire; this only moves it.
-               No `k_yield()`, so no dependence on how long the executor holds
-               the CPU -- that dependence was issue 0852. */
-            if (_z_serial_rx_get(&raw_buf[i], deadline) != 0) {
-                if (i > 0) {
-                    _z_zephyr_serial_stats.rx_partial++;
-                }
-                z_free(raw_buf);
-                return SIZE_MAX;
+    if (irq_rx) {
+        /* The ISR already took the bytes off the wire; this only moves the
+           frame. No `k_yield()`, so no dependence on how long the executor
+           holds the CPU -- that dependence was issue 0852 -- and one wake per
+           frame, so no dependence of the executor on the frame's wire time
+           either (nano-ros I10). */
+        bool timed_out = false;
+        rb = _z_serial_rx_frame(raw_buf, _Z_SERIAL_MAX_COBS_BUF_SIZE, _Z_ZEPHYR_SERIAL_TIMEOUT_MS, &timed_out);
+        if (timed_out) {
+            if (rb > 0) {
+                _z_zephyr_serial_stats.rx_partial++;
             }
-            res = 0;
-        } else
+            z_free(raw_buf);
+            return SIZE_MAX;
+        }
+        _z_serial_rx_check_errors(sock, rb);
+    } else
 #endif
-        {
+    {
+        for (size_t i = 0; i < _Z_SERIAL_MAX_COBS_BUF_SIZE; i++) {
+            /* Per-byte timeout. Yield rather than sleep between polls: at
+               115200 a byte is 87 us and the shortest z_sleep_ms(1) blocks a
+               whole tick, overrunning the UART. */
+            int64_t deadline = k_uptime_get() + (int64_t)_Z_ZEPHYR_SERIAL_TIMEOUT_MS;
+            int res = -1;
             while (res != 0) {
                 res = uart_poll_in(sock._serial, &raw_buf[i]);
                 if (res != 0) {
@@ -1322,48 +1432,11 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
                     k_yield();
                 }
             }
-        }
-
-        /* issue 0852 -- an overrun is a LOST BYTE, and it used to be silent.
-           `uart_poll_in` reports "no character available", never "a character
-           was destroyed before you asked", so a receiver that only checks its
-           return value cannot tell a quiet link from a link it is failing to
-           keep up with. That indistinguishability is what let this hide behind
-           six wrong hypotheses, ending in a router bug report (issue 0848) that
-           was wrong in every particular.
-
-           Checked per byte rather than per frame because the flag is sticky
-           until read: reading it here attributes the loss to the frame that
-           was actually damaged, which is what made the diagnosis provable. */
-        int uart_err = uart_err_check(sock._serial);
-        if (uart_err > 0 && (uart_err & UART_ERROR_OVERRUN) != 0) {
-            _z_zephyr_serial_stats.overruns++;
-            _Z_ERROR("serial RX OVERRUN after %zu byte(s) -- frame will be dropped", rb);
-        }
-        if (uart_err > 0) {
-            if ((uart_err & UART_ERROR_FRAMING) != 0) {
-                _z_zephyr_serial_stats.framing_errors++;
+            _z_serial_rx_check_errors(sock, rb);
+            rb++;
+            if (raw_buf[i] == (uint8_t)0x00) {
+                break;
             }
-            if ((uart_err & UART_ERROR_NOISE) != 0) {
-                _z_zephyr_serial_stats.noise_errors++;
-            }
-            if ((uart_err & UART_ERROR_PARITY) != 0) {
-                _z_zephyr_serial_stats.parity_errors++;
-            }
-        }
-#if defined(CONFIG_UART_INTERRUPT_DRIVEN)
-        /* A DIFFERENT loss from the one above, and worth keeping apart: the
-           hardware kept up and our ring did not, which says the ring is too
-           small or the reader is too slow, not that the ISR is too late. */
-        if (_z_serial_rx_ring_full) {
-            _z_serial_rx_ring_full = false;
-            _Z_ERROR("serial RX ring overflowed -- raise _Z_ZEPHYR_SERIAL_RX_RING_BYTES");
-        }
-#endif
-
-        rb++;
-        if (raw_buf[i] == (uint8_t)0x00) {
-            break;
         }
     }
 
