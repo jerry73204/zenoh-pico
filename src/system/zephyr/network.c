@@ -1408,6 +1408,260 @@ static void _z_serial_isr_body_lpuart(const struct device *dev, LPUART_Type *b) 
 }
 #endif /* _Z_ZEPHYR_SERIAL_FIFO_WATERMARK */
 
+#if defined(_Z_ZEPHYR_SERIAL_UART_ASYNC)
+/* -- the link by DMA: Zephyr's async UART API (nano-ros phase-474 I15+I16) -
+ *
+ * CONFIG_NROS_ZENOH_SERIAL_UART_ASYNC. The per-byte (or, with I14, per-FIFO)
+ * ISR is replaced by DMA in both directions; the rings, the reader and the
+ * senders are the same, only who fills and drains the rings changes.
+ *
+ * Both directions or neither: Zephyr keeps ONE callback API per UART when
+ * both APIs are built (UART_EXCLUSIVE_API_CALLBACKS, which the mcux LPUART
+ * driver requires). On that driver uart_callback_set refuses (-ENOTSUP) once
+ * the interrupt callback is set, uart_irq_callback_user_data_set clears the
+ * async callback, and its ISR dispatches to one of them by the API last set
+ * (uart_mcux_lpuart.c, mcux_lpuart_irq_callback_set / _callback_set /
+ * mcux_lpuart_isr). So TX by DMA with RX on the interrupt (I15 alone) is
+ * not possible; the console's UART is a different device and keeps its
+ * interrupt API.
+ *
+ * TX: a send still copies into the TX ring. When no transfer is in flight the
+ * ring's longest contiguous run is claimed and handed to uart_tx;
+ * UART_TX_DONE (the DMA ISR) finishes the claim, starts the next run and
+ * gives the TX semaphore by I13's rule (only while a sender waits, and only
+ * once half the ring is free). One DMA interrupt per run, i.e. per frame or
+ * two at the ring's wrap.
+ *
+ * RX: uart_rx_enable on one of two _Z_ZEPHYR_SERIAL_ASYNC_RX_BUF_BYTES
+ * buffers, UART_RX_BUF_REQUEST answered with the other. UART_RX_RDY puts the
+ * new bytes into the RX ring and gives the reader's semaphore by the ISR's
+ * rule (a 0x00 frame delimiter, or the ring half full). UART_RX_RDY comes
+ * from the DMA ISR when a buffer fills and, for the bytes before an idle
+ * line, from the driver's idle flush, which runs on the SYSTEM WORKQUEUE
+ * after k_work_reschedule(K_USEC(timeout)) (uart_mcux_lpuart.c,
+ * mcux_lpuart_async_isr and mcux_lpuart_async_rx_timeout): so the end of
+ * every frame reaches the reader one to two system ticks after its last byte
+ * (1-2 ms at CONFIG_SYS_CLOCK_TICKS_PER_SEC=1000), however small the timeout.
+ * A timeout of 0 disables that flush altogether, and a frame would wait for
+ * the buffer to fill. Two producers (an ISR and a thread), so the RX ring
+ * put is under a spinlock; the reader stays lock-free.
+ *
+ * Any RX error stops reception on that driver (UART_RX_STOPPED, then both
+ * buffers released, then UART_RX_DISABLED); the reason is counted into
+ * `_z_zephyr_serial_stats` and RX_DISABLED re-enables. The bytes lost make
+ * a frame fail its CRC, as on the interrupt path.
+ *
+ * Buffers: the DMA reads the TX ring and writes the RX buffers. They are
+ * this file's bss, so under CONFIG_NROS_ZENOH_SERIAL_TCM in DTCM, which is
+ * not behind the Cortex-M7 D-cache; the eDMA driver converts a DTCM address
+ * to the DMA's view itself (dma_mcux_edma.c EDMA_MMAP_ADDR). Without a
+ * D-cache no placement is needed. */
+
+#ifndef _Z_ZEPHYR_SERIAL_ASYNC_RX_BUF_BYTES
+#define _Z_ZEPHYR_SERIAL_ASYNC_RX_BUF_BYTES 256
+#endif
+/* Idle time before the driver flushes a partly filled RX buffer; rounded up
+   to a system tick by the driver's k_work_reschedule (see above). 25 us is
+   about two characters at 921,600. */
+#ifndef _Z_ZEPHYR_SERIAL_ASYNC_RX_TIMEOUT_US
+#define _Z_ZEPHYR_SERIAL_ASYNC_RX_TIMEOUT_US 25
+#endif
+
+/* Debugger-readable, like the other two.
+ *   active          1 while the link runs on the async API (0: it fell back
+ *                   to the interrupt path, or is not bound)
+ *   tx_dma          transfers started; tx_aborts, tx_errors (uart_tx refused)
+ *   rx_rdy          UART_RX_RDY events (DMA buffer full or idle flush)
+ *   rx_stopped      RX errors (the reason is in _z_zephyr_serial_stats)
+ *   rx_rearms       re-enables after RX_DISABLED; rx_rearm_failed */
+typedef struct {
+    uint32_t active;
+    uint32_t tx_dma;
+    uint32_t tx_aborts;
+    uint32_t tx_errors;
+    uint32_t rx_rdy;
+    uint32_t rx_stopped;
+    uint32_t rx_rearms;
+    uint32_t rx_rearm_failed;
+} _z_zephyr_serial_async_stats_t;
+volatile _z_zephyr_serial_async_stats_t _z_zephyr_serial_async_stats;
+
+static uint8_t _z_serial_async_rx_buf[2][_Z_ZEPHYR_SERIAL_ASYNC_RX_BUF_BYTES];
+/* The buffer to hand out next; both are free whenever RX is disabled. */
+static uint8_t _z_serial_async_rx_next;
+/* The device runs on the async API (set at bind, cleared on fallback). */
+static bool _z_serial_async = false;
+/* Clear while the link is being re-opened: no TX restart, no RX re-arm. */
+static volatile bool _z_serial_async_run = false;
+/* Bytes claimed from the TX ring by the transfer in flight; 0 = idle. */
+static uint32_t _z_serial_async_tx_len = 0;
+static struct k_spinlock _z_serial_async_lock;
+
+static void _z_serial_async_tx_kick(const struct device *dev) {
+    k_spinlock_key_t key = k_spin_lock(&_z_serial_async_lock);
+    if (_z_serial_async_run && _z_serial_async_tx_len == 0u) {
+        uint8_t *data;
+        uint32_t n = ring_buf_get_claim(&_z_serial_tx_ring, &data, _Z_ZEPHYR_SERIAL_TX_RING_BYTES);
+        if (n == 0u) {
+            (void)ring_buf_get_finish(&_z_serial_tx_ring, 0);
+        } else {
+            _z_serial_async_tx_len = n;
+            if (uart_tx(dev, data, n, SYS_FOREVER_US) == 0) {
+                _z_zephyr_serial_async_stats.tx_dma++;
+            } else {
+                /* Left in the ring; the next put kicks again, and a sender
+                   that waits for room times out as with stopped TX IRQs. */
+                (void)ring_buf_get_finish(&_z_serial_tx_ring, 0);
+                _z_serial_async_tx_len = 0;
+                _z_zephyr_serial_async_stats.tx_errors++;
+            }
+        }
+    }
+    k_spin_unlock(&_z_serial_async_lock, key);
+}
+
+static void _z_serial_async_rx_push(const uint8_t *data, uint32_t len) {
+    bool wake = (memchr(data, 0x00, len) != NULL);
+    k_spinlock_key_t key = k_spin_lock(&_z_serial_async_lock);
+    uint32_t put = ring_buf_put(&_z_serial_rx_ring, data, len);
+    _z_zephyr_serial_stats.rx_bytes += len;
+    if (put < len) {
+        _z_serial_rx_ring_full = true;
+        _z_zephyr_serial_stats.ring_overflows++;
+        wake = true;
+    }
+    uint32_t held = ring_buf_size_get(&_z_serial_rx_ring);
+    if (held > _z_zephyr_serial_stats.ring_high_water) {
+        _z_zephyr_serial_stats.ring_high_water = held;
+    }
+    k_spin_unlock(&_z_serial_async_lock, key);
+    if (wake || held >= (uint32_t)(_Z_ZEPHYR_SERIAL_RX_RING_BYTES / 2)) {
+        k_sem_give(&_z_serial_rx_sem);
+    }
+}
+
+static void _z_serial_async_rx_start(const struct device *dev) {
+    uint8_t *buf = _z_serial_async_rx_buf[_z_serial_async_rx_next];
+    _z_serial_async_rx_next ^= 1u;
+    if (uart_rx_enable(dev, buf, sizeof(_z_serial_async_rx_buf[0]), _Z_ZEPHYR_SERIAL_ASYNC_RX_TIMEOUT_US) == 0) {
+        _z_zephyr_serial_async_stats.rx_rearms++;
+    } else {
+        _z_zephyr_serial_async_stats.rx_rearm_failed++;
+    }
+}
+
+static void _z_serial_async_cb_body(const struct device *dev, struct uart_event *evt) {
+    switch (evt->type) {
+        case UART_TX_DONE:
+        case UART_TX_ABORTED: {
+            k_spinlock_key_t key = k_spin_lock(&_z_serial_async_lock);
+            if (_z_serial_async_tx_len != 0u) {
+                uint32_t sent = (uint32_t)evt->data.tx.len;
+                if (sent > _z_serial_async_tx_len) {
+                    sent = _z_serial_async_tx_len;
+                }
+                /* A partial finish (an abort) rewinds the rest of the claim. */
+                (void)ring_buf_get_finish(&_z_serial_tx_ring, sent);
+                _z_serial_async_tx_len = 0;
+                _z_zephyr_serial_tx_stats.irq_bytes += sent;
+            }
+            if (evt->type == UART_TX_ABORTED) {
+                _z_zephyr_serial_async_stats.tx_aborts++;
+            }
+            k_spin_unlock(&_z_serial_async_lock, key);
+            _z_serial_async_tx_kick(dev);
+            if (_z_serial_tx_waiting &&
+                ring_buf_space_get(&_z_serial_tx_ring) >= (uint32_t)(_Z_ZEPHYR_SERIAL_TX_RING_BYTES / 2)) {
+                k_sem_give(&_z_serial_tx_sem);
+            }
+            break;
+        }
+        case UART_RX_RDY:
+            _z_zephyr_serial_async_stats.rx_rdy++;
+            _z_serial_async_rx_push(&evt->data.rx.buf[evt->data.rx.offset], (uint32_t)evt->data.rx.len);
+            break;
+        case UART_RX_BUF_REQUEST:
+            if (_z_serial_async_run) {
+                uint8_t *buf = _z_serial_async_rx_buf[_z_serial_async_rx_next];
+                _z_serial_async_rx_next ^= 1u;
+                (void)uart_rx_buf_rsp(dev, buf, sizeof(_z_serial_async_rx_buf[0]));
+            }
+            break;
+        case UART_RX_STOPPED: {
+            uint32_t why = (uint32_t)evt->data.rx_stop.reason;
+            _z_zephyr_serial_async_stats.rx_stopped++;
+            if ((why & UART_ERROR_OVERRUN) != 0u) {
+                _z_zephyr_serial_stats.overruns++;
+            }
+            if ((why & UART_ERROR_FRAMING) != 0u) {
+                _z_zephyr_serial_stats.framing_errors++;
+            }
+            if ((why & UART_ERROR_NOISE) != 0u) {
+                _z_zephyr_serial_stats.noise_errors++;
+            }
+            if ((why & UART_ERROR_PARITY) != 0u) {
+                _z_zephyr_serial_stats.parity_errors++;
+            }
+            break;
+        }
+        case UART_RX_DISABLED:
+            if (_z_serial_async_run) {
+                _z_serial_async_rx_start(dev);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static void _z_serial_async_cb(const struct device *dev, struct uart_event *evt, void *user_data) {
+    ARG_UNUSED(user_data);
+#if defined(_Z_ZEPHYR_SERIAL_ISR_STATS)
+    /* Counts the idle flush too, which runs on the system workqueue. */
+    uint32_t t0 = k_cycle_get_32();
+    _z_serial_async_cb_body(dev, evt);
+    _z_zephyr_serial_isr_cycles += k_cycle_get_32() - t0;
+    _z_zephyr_serial_isr_calls++;
+#else
+    _z_serial_async_cb_body(dev, evt);
+#endif
+}
+
+/* Before uart_configure() on a re-open: stop both DMA directions so the
+   reconfigure (LPUART_Deinit/Init) does not run under a live transfer, and
+   so neither callback restarts one. */
+static void _z_serial_async_quiesce(const struct device *dev) {
+    _z_serial_async_run = false;
+    if (_z_serial_async_tx_len != 0u) {
+        (void)uart_tx_abort(dev);
+    }
+    (void)uart_rx_disable(dev);
+    _z_serial_async_tx_len = 0;
+}
+
+/* Every open, after uart_configure(): empty rings, then RX on buffer 0. */
+static bool _z_serial_async_arm(const struct device *dev) {
+    _z_serial_async_run = false;
+    ring_buf_reset(&_z_serial_rx_ring);
+    k_sem_reset(&_z_serial_rx_sem);
+    _z_serial_rx_ring_full = false;
+    ring_buf_reset(&_z_serial_tx_ring);
+    k_sem_reset(&_z_serial_tx_sem);
+    _z_serial_async_tx_len = 0;
+    _z_serial_async_rx_next = 0;
+    _z_serial_async_run = true;
+    uint8_t *buf = _z_serial_async_rx_buf[_z_serial_async_rx_next];
+    _z_serial_async_rx_next ^= 1u;
+    if (uart_rx_enable(dev, buf, sizeof(_z_serial_async_rx_buf[0]), _Z_ZEPHYR_SERIAL_ASYNC_RX_TIMEOUT_US) != 0) {
+        _z_serial_async_run = false;
+        return false;
+    }
+    _z_serial_tx_irq = true;
+    _z_zephyr_serial_async_stats.active = 1u;
+    return true;
+}
+#endif /* _Z_ZEPHYR_SERIAL_UART_ASYNC */
+
 /* Attach the ISR to `dev`. Idempotent for the SAME device so a reconnect does
    not have to tear down; refuses a second, different device rather than
    quietly rebinding the one link the buffer can represent. */
@@ -1420,12 +1674,38 @@ static bool _z_serial_rx_bind(const struct device *dev) {
     if (_z_serial_rx_dev == NULL) {
         ring_buf_init(&_z_serial_rx_ring, sizeof(_z_serial_rx_storage), _z_serial_rx_storage);
         ring_buf_init(&_z_serial_tx_ring, sizeof(_z_serial_tx_storage), _z_serial_tx_storage);
-        if (uart_irq_callback_user_data_set(dev, _z_serial_isr, NULL) != 0) {
+#if defined(_Z_ZEPHYR_SERIAL_UART_ASYNC)
+        /* I15+I16: the async API when the device has it (-ENOSYS without
+           async support, -ENOTSUP on an mcux LPUART already on the IRQ API);
+           otherwise the interrupt path below, as without the option. */
+        if (uart_callback_set(dev, _z_serial_async_cb, NULL) == 0) {
+            _z_serial_async = true;
+        } else
+#endif
+            if (uart_irq_callback_user_data_set(dev, _z_serial_isr, NULL) != 0) {
             _Z_ERROR("uart_irq_callback_user_data_set failed -- falling back to polled RX");
             return false;
         }
         _z_serial_rx_dev = dev;
     }
+
+#if defined(_Z_ZEPHYR_SERIAL_UART_ASYNC)
+    if (_z_serial_async) {
+        if (_z_serial_async_arm(dev)) {
+            return true;
+        }
+        /* RX DMA would not start (no channel, or the driver refused): run the
+           link on the interrupt API instead, for the life of the image. */
+        _Z_ERROR("serial: uart_rx_enable failed -- falling back to interrupt-driven RX/TX");
+        _z_serial_async = false;
+        _z_zephyr_serial_async_stats.active = 0u;
+        if (uart_irq_callback_user_data_set(dev, _z_serial_isr, NULL) != 0) {
+            _z_serial_rx_dev = NULL;
+            _z_serial_tx_irq = false;
+            return false;
+        }
+    }
+#endif
 
     /* Re-arm on EVERY open, not just the first.
      *
@@ -1529,7 +1809,14 @@ static int _z_serial_tx_put(const struct device *dev, const uint8_t *data, size_
         if (held > _z_zephyr_serial_tx_stats.ring_high_water) {
             _z_zephyr_serial_tx_stats.ring_high_water = held;
         }
-        uart_irq_tx_enable(dev);
+#if defined(_Z_ZEPHYR_SERIAL_UART_ASYNC)
+        if (_z_serial_async) {
+            _z_serial_async_tx_kick(dev);
+        } else
+#endif
+        {
+            uart_irq_tx_enable(dev);
+        }
         if (done < len) {
             _z_zephyr_serial_tx_stats.waits++;
             /* A "room was made" hint, like the RX sem: re-check the ring on
@@ -1567,6 +1854,11 @@ z_result_t _z_open_serial_from_dev(_z_sys_net_socket_t *sock, char *dev, uint32_
             .data_bits = UART_CFG_DATA_BITS_8,     // Default in Zenoh Rust
             .flow_ctrl = UART_CFG_FLOW_CTRL_NONE,  // Default in Zenoh Rust
         };
+#if defined(CONFIG_UART_INTERRUPT_DRIVEN) && defined(_Z_ZEPHYR_SERIAL_UART_ASYNC)
+        if (_z_serial_async && _z_serial_rx_dev == sock->_serial) {
+            _z_serial_async_quiesce(sock->_serial);
+        }
+#endif
         if (uart_configure(sock->_serial, &config) != 0) {
             _Z_ERROR_LOG(_Z_ERR_GENERIC);
             ret = _Z_ERR_GENERIC;
