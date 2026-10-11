@@ -1025,11 +1025,34 @@ volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
  * READY). The read task has to outrank, or equal, every thread that can run
  * while bytes arrive; that is the priority half of issue 1534.
  *
- * The sender is single by construction: zenoh-pico holds the transport's TX
- * mutex across a send, so the ring has one producer (a thread) and one
- * consumer (the ISR), which is what `ring_buf` needs without a lock. */
+ * The ring has one producer (a thread) and one consumer (the ISR), which is
+ * what `ring_buf` needs without a lock. The producer is single because
+ * `_z_send_serial_internal` holds `_z_serial_tx_lock` across a send (see
+ * there); zenoh-pico's transport TX mutex usually serialises senders too, but
+ * not on every path (the handshake, and the split-lock fragment path).
+ *
+ * -- a send that fits does not wait (nano-ros I12) -------------------------
+ *
+ * The ring used to be 256 bytes, so any frame longer than that slept here
+ * until the wire drained it: about 11 us a byte at 921,600, so 2 ms or more
+ * for a 200-byte-plus publish. The sender holds the transport TX mutex while
+ * it does, so a publish from the executor's spin thread also waited behind
+ * ANOTHER sender's frame (the tx-flush or lease task), for that frame's wire
+ * time. Measured on an S32K344: late spins of 1.4-2.8 ms, all of it at the
+ * transport mutex.
+ *
+ * The ring now holds a whole maximum-size frame (_Z_SERIAL_MAX_COBS_BUF_SIZE,
+ * 1516 bytes) by default, the way a Linux tty's xmit buffer or an AUTOSAR COM
+ * send works: a send that fits is copied and returns, and the wire drains it
+ * in the background. A send that does NOT fit (the ring still holds earlier
+ * frames) queues what fits and sleeps for the rest, bounded by
+ * _Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS as before: reliable traffic is never dropped
+ * to make room. `frames_waited` counts those sends, so a ring that ever
+ * filled shows up there. A board with traffic bursts sets it larger
+ * (CONFIG_NROS_ZENOH_SERIAL_TX_RING_BYTES); a smaller ring still works, it
+ * only waits more. */
 #ifndef _Z_ZEPHYR_SERIAL_TX_RING_BYTES
-#define _Z_ZEPHYR_SERIAL_TX_RING_BYTES 256
+#define _Z_ZEPHYR_SERIAL_TX_RING_BYTES 2048
 #endif
 /* How long a sender waits for the ISR to make room before it gives up on the
    frame. The ring drains at line rate, so this only expires if TX interrupts
@@ -1042,12 +1065,19 @@ volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
  *   irq_bytes      bytes the TX ISR handed to the UART FIFO
  *   waits          times a sender slept for room in the TX ring
  *   timeouts       frames abandoned because no room appeared in time
- *   ring_high_water the most the TX ring held */
+ *   ring_high_water the most the TX ring held
+ *   frames_waited  frames that did not fit the ring whole when queued, so
+ *                  their sender waited for the wire (the ring "filled");
+ *                  zero means every send was a copy and a return
+ *   max_frame      the longest frame queued, in wire bytes; a ring smaller
+ *                  than this makes that frame wait every time */
 typedef struct {
     uint32_t irq_bytes;
     uint32_t waits;
     uint32_t timeouts;
     uint32_t ring_high_water;
+    uint32_t frames_waited;
+    uint32_t max_frame;
 } _z_zephyr_serial_tx_stats_t;
 volatile _z_zephyr_serial_tx_stats_t _z_zephyr_serial_tx_stats;
 
@@ -1234,13 +1264,20 @@ static size_t _z_serial_rx_frame(uint8_t *buf, size_t cap, uint32_t timeout_ms, 
     }
 }
 
-/* Queue `len` bytes for the TX ISR, sleeping while the ring is full. Returns
-   0 when every byte is queued, -1 if no room appeared for
-   _Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS (TX interrupts stopped). Returning with bytes
-   still queued is correct: the next frame queues behind them, and COBS
-   framing does not care when a byte leaves. */
+/* Queue `len` bytes for the TX ISR. With room for all of them this is one copy
+   and a return (the common case, nano-ros I12); otherwise it queues what fits
+   and sleeps for the rest. Returns 0 when every byte is queued, -1 if no room
+   appeared for _Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS (TX interrupts stopped).
+   Returning with bytes still queued is correct: the next frame queues behind
+   them, and COBS framing does not care when a byte leaves. */
 static int _z_serial_tx_put(const struct device *dev, const uint8_t *data, size_t len) {
     size_t done = 0;
+    if (len > _z_zephyr_serial_tx_stats.max_frame) {
+        _z_zephyr_serial_tx_stats.max_frame = (uint32_t)len;
+    }
+    if (ring_buf_space_get(&_z_serial_tx_ring) < (uint32_t)len) {
+        _z_zephyr_serial_tx_stats.frames_waited++;
+    }
     while (done < len) {
         uint32_t put = ring_buf_put(&_z_serial_tx_ring, &data[done], (uint32_t)(len - done));
         done += put;
@@ -1378,12 +1415,23 @@ static void _z_serial_rx_check_errors(const _z_sys_net_socket_t sock, size_t rb)
 #endif
 }
 
-size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len) {
-    uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
-    if (raw_buf == NULL) {
-        _Z_ERROR("Failed to allocate serial COBS buffer");
-        return SIZE_MAX;
-    }
+/* Framing buffers (nano-ros I12). Send and receive used to z_malloc two
+   ~1.5 KiB buffers per FRAME each (and copy the payload into a temporary
+   before COBS-encoding it); they are static now, one set per direction, which
+   is what one serial link per image needs (see the RX ring). The send side
+   no longer needs the temporary at all (`_z_serial_msg_serialize_direct`).
+   Each set has its own lock: a send and a receive run concurrently (tx-flush
+   or publisher vs. the read task), two sends or two receives must not share a
+   buffer, and the lock is uncontended in steady state. The receive lock is
+   held across the frame wait, which is the reader's own time. */
+static uint8_t _z_serial_tx_frame_buf[_Z_SERIAL_MAX_COBS_BUF_SIZE];
+static K_MUTEX_DEFINE(_z_serial_tx_lock);
+static uint8_t _z_serial_rx_raw_buf[_Z_SERIAL_MAX_COBS_BUF_SIZE];
+static uint8_t _z_serial_rx_tmp_buf[_Z_SERIAL_MFS_SIZE];
+static K_MUTEX_DEFINE(_z_serial_rx_lock);
+
+static size_t _z_read_serial_frame_locked(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len) {
+    uint8_t *raw_buf = _z_serial_rx_raw_buf;
     size_t rb = 0;
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
     const bool irq_rx = (_z_serial_rx_dev != NULL && _z_serial_rx_dev == sock._serial);
@@ -1409,7 +1457,6 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
             if (rb > 0) {
                 _z_zephyr_serial_stats.rx_partial++;
             }
-            z_free(raw_buf);
             return SIZE_MAX;
         }
         _z_serial_rx_check_errors(sock, rb);
@@ -1426,7 +1473,6 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
                 res = uart_poll_in(sock._serial, &raw_buf[i]);
                 if (res != 0) {
                     if (k_uptime_get() > deadline) {
-                        z_free(raw_buf);
                         return SIZE_MAX;
                     }
                     k_yield();
@@ -1440,43 +1486,29 @@ size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, 
         }
     }
 
-    uint8_t *tmp_buf = (uint8_t *)z_malloc(_Z_SERIAL_MFS_SIZE);
-    if (tmp_buf == NULL) {
-        _Z_ERROR("Failed to allocate serial MFS buffer");
-        z_free(raw_buf);
-        return SIZE_MAX;
-    }
-    size_t ret = _z_serial_msg_deserialize(raw_buf, rb, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
+    size_t ret =
+        _z_serial_msg_deserialize(raw_buf, rb, ptr, len, header, _z_serial_rx_tmp_buf, sizeof(_z_serial_rx_tmp_buf));
     if (ret == SIZE_MAX) {
         _z_zephyr_serial_stats.rx_bad_frames++;
     } else {
         _z_zephyr_serial_stats.rx_frames++;
     }
 
-    z_free(raw_buf);
-    z_free(tmp_buf);
-
     return ret;
 }
 
-size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, const uint8_t *ptr, size_t len) {
-    uint8_t *tmp_buf = (uint8_t *)z_malloc(_Z_SERIAL_MFS_SIZE);
-    uint8_t *raw_buf = (uint8_t *)z_malloc(_Z_SERIAL_MAX_COBS_BUF_SIZE);
+size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len) {
+    (void)k_mutex_lock(&_z_serial_rx_lock, K_FOREVER);
+    size_t ret = _z_read_serial_frame_locked(sock, header, ptr, len);
+    (void)k_mutex_unlock(&_z_serial_rx_lock);
+    return ret;
+}
 
-    if ((raw_buf == NULL) || (tmp_buf == NULL)) {
-        _Z_ERROR("Failed to allocate serial COBS and/or MFS buffer");
-        z_free(raw_buf);
-        z_free(tmp_buf);
-        return SIZE_MAX;
-    }
-    size_t ret =
-        _z_serial_msg_serialize(raw_buf, _Z_SERIAL_MAX_COBS_BUF_SIZE, ptr, len, header, tmp_buf, _Z_SERIAL_MFS_SIZE);
-
+static size_t _z_send_serial_frame_locked(const _z_sys_net_socket_t sock, uint8_t header, const uint8_t *ptr,
+                                          size_t len) {
+    uint8_t *raw_buf = _z_serial_tx_frame_buf;
+    size_t ret = _z_serial_msg_serialize_direct(raw_buf, sizeof(_z_serial_tx_frame_buf), ptr, len, header);
     if (ret == SIZE_MAX) {
-        /* Both buffers leaked here: ~3 KiB per failed send, and a link that is
-           retrying a handshake fails repeatedly. */
-        z_free(raw_buf);
-        z_free(tmp_buf);
         return ret;
     }
 
@@ -1489,8 +1521,6 @@ size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, c
         if (_z_serial_tx_put(sock._serial, raw_buf, ret) != 0) {
             _Z_ERROR("serial TX stalled: no room in the TX ring for %u ms", (unsigned)_Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS);
             _z_zephyr_serial_stats.tx_busy_cycles += k_cycle_get_32() - t0;
-            z_free(raw_buf);
-            z_free(tmp_buf);
             return SIZE_MAX;
         }
     } else
@@ -1504,10 +1534,14 @@ size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, c
     _z_zephyr_serial_stats.tx_bytes += (uint32_t)ret;
     _z_zephyr_serial_stats.tx_frames++;
 
-    z_free(raw_buf);
-    z_free(tmp_buf);
-
     return len;
+}
+
+size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, const uint8_t *ptr, size_t len) {
+    (void)k_mutex_lock(&_z_serial_tx_lock, K_FOREVER);
+    size_t ret = _z_send_serial_frame_locked(sock, header, ptr, len);
+    (void)k_mutex_unlock(&_z_serial_tx_lock);
+    return ret;
 }
 #endif
 

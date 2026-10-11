@@ -15,6 +15,7 @@
 #ifndef INCLUDE_ZENOH_PICO_PROTOCOL_CODEC_SERIAL_H
 #define INCLUDE_ZENOH_PICO_PROTOCOL_CODEC_SERIAL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -23,6 +24,10 @@ extern "C" {
 
 size_t _z_serial_msg_serialize(uint8_t *dest, size_t dest_len, const uint8_t *src, size_t src_len, uint8_t header,
                                uint8_t *tmp_buf, size_t tmp_buf_len);
+/* As `_z_serial_msg_serialize`, without the temporary buffer: the frame is
+   COBS-encoded straight from `header`, `src` and its CRC into `dest`. */
+size_t _z_serial_msg_serialize_direct(uint8_t *dest, size_t dest_len, const uint8_t *src, size_t src_len,
+                                      uint8_t header);
 size_t _z_serial_msg_deserialize(const uint8_t *src, size_t src_len, uint8_t *dst, size_t dst_len, uint8_t *header,
                                  uint8_t *tmp_buf, size_t tmp_buf_len);
 
