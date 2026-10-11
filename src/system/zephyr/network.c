@@ -1124,12 +1124,18 @@ volatile uint32_t _z_zephyr_serial_isr_calls;
  * first byte written. So on this path the ISR reads and fills the FIFO
  * registers itself:
  *
- *   - WATER.RXWATER = _Z_ZEPHYR_SERIAL_LPUART_RXWATER (2): RDRF asserts when
- *     the RX FIFO holds MORE than that, i.e. 3 bytes, and FIFO.RXIDEN = 1
- *     asserts it as well after one idle character with anything below the
- *     watermark, so a frame's tail is not stranded. The ISR drains
- *     WATER.RXCOUNT bytes. Overrun margin: the one free FIFO slot plus the
- *     byte in the shift register, about 22 us at 921,600 (was about 44 us).
+ *   - WATER.RXWATER = _Z_ZEPHYR_SERIAL_LPUART_RXWATER (CONFIG_NROS_ZENOH_
+ *     SERIAL_FIFO_RXWATER, default 1): RDRF asserts when the RX FIFO holds
+ *     MORE than that, i.e. water + 1 bytes, and FIFO.RXIDEN = 1 asserts it
+ *     as well after one idle character with anything below the watermark,
+ *     so a frame's tail is not stranded. The ISR drains WATER.RXCOUNT bytes.
+ *     Overrun margin from RDRF to OR, for a FIFO of depth D: the free slots
+ *     plus the shift register, D + 1 - (water + 1) = D - water characters.
+ *     On the 4-deep S32K344 FIFO at 921,600 (10.85 us a character): water 0
+ *     44 us, 1 33 us, 2 22 us, 3 11 us. Water 2 measured about 3x fewer RX
+ *     calls but 4 overruns a run on the island, so the default is 1: half
+ *     the RX interrupts of water 0 for a quarter of its margin. Clamped to
+ *     D - 1 at arm time (PARAM.RXFIFO).
  *   - TXWATER stays 0: on TDRE the ISR writes (FIFO depth - WATER.TXCOUNT)
  *     bytes, 4 on an S32K344.
  *
@@ -1145,7 +1151,7 @@ volatile uint32_t _z_zephyr_serial_isr_calls;
 #include <zephyr/irq.h>
 
 #ifndef _Z_ZEPHYR_SERIAL_LPUART_RXWATER
-#define _Z_ZEPHYR_SERIAL_LPUART_RXWATER 2
+#define _Z_ZEPHYR_SERIAL_LPUART_RXWATER 1
 #endif
 
 /* STAT bits that are write-1-to-clear; the rest of STAT is configuration and
@@ -1198,7 +1204,12 @@ static void _z_serial_lpuart_arm(LPUART_Type *b) {
     uint32_t fifo = b->FIFO & ~(LPUART_FIFO_RXUF_MASK | LPUART_FIFO_TXOF_MASK | LPUART_FIFO_RXFLUSH_MASK |
                                 LPUART_FIFO_TXFLUSH_MASK | LPUART_FIFO_RXIDEN_MASK);
     b->FIFO = fifo | LPUART_FIFO_RXFE_MASK | LPUART_FIFO_TXFE_MASK | LPUART_FIFO_RXIDEN(1);
-    b->WATER = LPUART_WATER_RXWATER(_Z_ZEPHYR_SERIAL_LPUART_RXWATER) | LPUART_WATER_TXWATER(0);
+    uint32_t rxfifo = 1u << ((b->PARAM & LPUART_PARAM_RXFIFO_MASK) >> LPUART_PARAM_RXFIFO_SHIFT);
+    uint32_t water = (uint32_t)(_Z_ZEPHYR_SERIAL_LPUART_RXWATER);
+    if (water > rxfifo - 1u) {
+        water = rxfifo - 1u;
+    }
+    b->WATER = LPUART_WATER_RXWATER(water) | LPUART_WATER_TXWATER(0);
     _z_serial_lpuart_txfifo = 1u << ((b->PARAM & LPUART_PARAM_TXFIFO_MASK) >> LPUART_PARAM_TXFIFO_SHIFT);
     b->CTRL = ctrl;
     irq_unlock(key);
@@ -1333,7 +1344,15 @@ static void _z_serial_isr_body_lpuart(const struct device *dev, LPUART_Type *b) 
     if ((stat & LPUART_STAT_OR_MASK) != 0u) {
         /* Counted here, where it is seen: the driver clears OR after this
            callback returns, so the reader's uart_err_check would mostly miss
-           it on this path. */
+           it on this path. Clearing OR drops nothing: the byte is already
+           lost (OR means the shift register's character found the FIFO
+           full), the FIFO keeps its contents, and the receiver stores
+           nothing new while OR is set, so clearing it BEFORE the drain below
+           is what lets reception resume soonest. Only OR is written as 1;
+           the other W1C flags (IDLE among them) are written 0, so a flag
+           the reader's uart_err_check wants is not consumed here. RXIDEN
+           needs no clear: it asserts RDRF only while the receiver is idle
+           with RXCOUNT > 0, and the drain below takes RXCOUNT to 0. */
         _z_zephyr_serial_stats.overruns++;
         b->STAT = (stat & ~_Z_LPUART_STAT_W1C) | LPUART_STAT_OR_MASK;
     }
