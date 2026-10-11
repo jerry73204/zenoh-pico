@@ -1112,17 +1112,125 @@ volatile uint32_t _z_zephyr_serial_isr_cycles;
 volatile uint32_t _z_zephyr_serial_isr_calls;
 #endif
 
+#if defined(_Z_ZEPHYR_SERIAL_FIFO_WATERMARK)
+/* -- one interrupt per FIFO, not per byte (nano-ros phase-474 I14) --------
+ *
+ * CONFIG_NROS_ZENOH_SERIAL_FIFO_WATERMARK, NXP LPUART only. The mcux driver
+ * leaves both FIFO watermarks at 0, so RDRF (the RX interrupt) asserts on the
+ * first byte in the 4-deep RX FIFO and TDRE (TX) only once the TX FIFO is
+ * empty; at 921,600 baud and about 7 us an ISR that is one ISR a byte. Its
+ * `fifo_read` also loops on RDRF, which with a watermark above 0 would leave
+ * bytes in the FIFO, and `fifo_fill` stops at TDRE, which drops after the
+ * first byte written. So on this path the ISR reads and fills the FIFO
+ * registers itself:
+ *
+ *   - WATER.RXWATER = _Z_ZEPHYR_SERIAL_LPUART_RXWATER (2): RDRF asserts when
+ *     the RX FIFO holds MORE than that, i.e. 3 bytes, and FIFO.RXIDEN = 1
+ *     asserts it as well after one idle character with anything below the
+ *     watermark, so a frame's tail is not stranded. The ISR drains
+ *     WATER.RXCOUNT bytes. Overrun margin: the one free FIFO slot plus the
+ *     byte in the shift register, about 22 us at 921,600 (was about 44 us).
+ *   - TXWATER stays 0: on TDRE the ISR writes (FIFO depth - WATER.TXCOUNT)
+ *     bytes, 4 on an S32K344.
+ *
+ * About 3x fewer RX calls and 4x fewer TX calls. Interrupt enables still go
+ * through uart_irq_{rx,tx}_{enable,disable}; only data, counts and the
+ * overrun flag are touched here. The register base is found from the
+ * devicetree (one entry per okay nxp,lpuart node), never from the driver's
+ * private config. Register layout: S32K344_LPUART.h (hal_nxp, STAT 0x14,
+ * CTRL 0x18, DATA 0x1C, FIFO 0x28, WATER 0x2C), the same LPUART_Type every
+ * NXP LPUART SoC header defines. */
+#include <fsl_device_registers.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/irq.h>
+
+#ifndef _Z_ZEPHYR_SERIAL_LPUART_RXWATER
+#define _Z_ZEPHYR_SERIAL_LPUART_RXWATER 2
+#endif
+
+/* STAT bits that are write-1-to-clear; the rest of STAT is configuration and
+   is written back unchanged (the HAL's LPUART_ClearStatusFlags rule). */
+#define _Z_LPUART_STAT_W1C                                                                                  \
+    (LPUART_STAT_LBKDIF_MASK | LPUART_STAT_RXEDGIF_MASK | LPUART_STAT_IDLE_MASK | LPUART_STAT_OR_MASK |    \
+     LPUART_STAT_NF_MASK | LPUART_STAT_FE_MASK | LPUART_STAT_PF_MASK | LPUART_STAT_MA1F_MASK |              \
+     LPUART_STAT_MA2F_MASK)
+
+typedef struct {
+    const struct device *dev;
+    uintptr_t base;
+} _z_serial_lpuart_map_t;
+
+#define _Z_SERIAL_LPUART_MAP_ENTRY(node) {DEVICE_DT_GET(node), DT_REG_ADDR(node)},
+static const _z_serial_lpuart_map_t _z_serial_lpuart_map[] = {
+    DT_FOREACH_STATUS_OKAY(nxp_lpuart, _Z_SERIAL_LPUART_MAP_ENTRY)};
+
+/* The bound device's registers when it is an LPUART, else NULL (the generic
+   ISR body runs). Set at bind, before RX interrupts are enabled; the TX
+   FIFO depth with it. Zero-initialised on purpose: bss, so in DTCM with the
+   rings under CONFIG_NROS_ZENOH_SERIAL_TCM (an initialised value would sit
+   in .data, in cached SRAM). */
+static LPUART_Type *_z_serial_lpuart;
+static uint32_t _z_serial_lpuart_txfifo;
+
+static LPUART_Type *_z_serial_lpuart_lookup(const struct device *dev) {
+    for (size_t i = 0; i < ARRAY_SIZE(_z_serial_lpuart_map); i++) {
+        if (_z_serial_lpuart_map[i].dev == dev) {
+            return (LPUART_Type *)_z_serial_lpuart_map[i].base;
+        }
+    }
+    return NULL;
+}
+
+/* After every uart_configure (which re-runs LPUART_Init and so rewrites
+   WATER to 0): watermarks and the idle-empty RX request. The FIFO and WATER
+   fields are written with the transmitter and receiver disabled, as
+   LPUART_Init does; this runs while the link is being opened, so a byte
+   the peer sent at this instant is lost to a handshake that retries. */
+static void _z_serial_lpuart_arm(LPUART_Type *b) {
+    unsigned int key = irq_lock();
+    uint32_t ctrl = b->CTRL;
+    b->CTRL = ctrl & ~(LPUART_CTRL_TE_MASK | LPUART_CTRL_RE_MASK);
+    /* TE/RE read back 1 until the character in flight completes: about 11 us
+       at 921,600, 87 us at 115,200. Bounded so a stuck bit cannot hang. */
+    for (uint32_t spin = 0; (b->CTRL & (LPUART_CTRL_TE_MASK | LPUART_CTRL_RE_MASK)) != 0u && spin < 100000u;
+         spin++) {
+    }
+    uint32_t fifo = b->FIFO & ~(LPUART_FIFO_RXUF_MASK | LPUART_FIFO_TXOF_MASK | LPUART_FIFO_RXFLUSH_MASK |
+                                LPUART_FIFO_TXFLUSH_MASK | LPUART_FIFO_RXIDEN_MASK);
+    b->FIFO = fifo | LPUART_FIFO_RXFE_MASK | LPUART_FIFO_TXFE_MASK | LPUART_FIFO_RXIDEN(1);
+    b->WATER = LPUART_WATER_RXWATER(_Z_ZEPHYR_SERIAL_LPUART_RXWATER) | LPUART_WATER_TXWATER(0);
+    _z_serial_lpuart_txfifo = 1u << ((b->PARAM & LPUART_PARAM_TXFIFO_MASK) >> LPUART_PARAM_TXFIFO_SHIFT);
+    b->CTRL = ctrl;
+    irq_unlock(key);
+}
+#endif /* _Z_ZEPHYR_SERIAL_FIFO_WATERMARK */
+
 static void _z_serial_isr_body(const struct device *dev);
+
+#if defined(_Z_ZEPHYR_SERIAL_FIFO_WATERMARK)
+static void _z_serial_isr_body_lpuart(const struct device *dev, LPUART_Type *b);
+#define _Z_SERIAL_ISR_BODY(dev)                                    \
+    do {                                                           \
+        LPUART_Type *_b = _z_serial_lpuart;                        \
+        if (_b != NULL) {                                          \
+            _z_serial_isr_body_lpuart((dev), _b);                  \
+        } else {                                                   \
+            _z_serial_isr_body(dev);                               \
+        }                                                          \
+    } while (0)
+#else
+#define _Z_SERIAL_ISR_BODY(dev) _z_serial_isr_body(dev)
+#endif
 
 static void _z_serial_isr(const struct device *dev, void *user_data) {
     ARG_UNUSED(user_data);
 #if defined(_Z_ZEPHYR_SERIAL_ISR_STATS)
     uint32_t t0 = k_cycle_get_32();
-    _z_serial_isr_body(dev);
+    _Z_SERIAL_ISR_BODY(dev);
     _z_zephyr_serial_isr_cycles += k_cycle_get_32() - t0;
     _z_zephyr_serial_isr_calls++;
 #else
-    _z_serial_isr_body(dev);
+    _Z_SERIAL_ISR_BODY(dev);
 #endif
 }
 
@@ -1216,6 +1324,90 @@ static void _z_serial_isr_body(const struct device *dev) {
     }
 }
 
+#if defined(_Z_ZEPHYR_SERIAL_FIFO_WATERMARK)
+/* The I14 body: the generic one with the FIFO registers read and filled
+   directly (see the note at _z_serial_lpuart_arm). Same ring, same wake
+   rules, same counters. */
+static void _z_serial_isr_body_lpuart(const struct device *dev, LPUART_Type *b) {
+    uint32_t stat = b->STAT;
+    if ((stat & LPUART_STAT_OR_MASK) != 0u) {
+        /* Counted here, where it is seen: the driver clears OR after this
+           callback returns, so the reader's uart_err_check would mostly miss
+           it on this path. */
+        _z_zephyr_serial_stats.overruns++;
+        b->STAT = (stat & ~_Z_LPUART_STAT_W1C) | LPUART_STAT_OR_MASK;
+    }
+
+    uint32_t rx_n = 0;
+    bool rx_wake = false;
+    for (;;) {
+        uint32_t cnt = (b->WATER & LPUART_WATER_RXCOUNT_MASK) >> LPUART_WATER_RXCOUNT_SHIFT;
+        if (cnt == 0u) {
+            break;
+        }
+        uint8_t chunk[8];
+        if (cnt > sizeof(chunk)) {
+            cnt = sizeof(chunk);
+        }
+        for (uint32_t i = 0; i < cnt; i++) {
+            chunk[i] = (uint8_t)b->DATA;
+            if (chunk[i] == 0x00u) {
+                rx_wake = true;
+            }
+        }
+        uint32_t put = ring_buf_put(&_z_serial_rx_ring, chunk, cnt);
+        rx_n += cnt;
+        if (put < cnt) {
+            _z_serial_rx_ring_full = true;
+            _z_zephyr_serial_stats.ring_overflows++;
+            rx_wake = true;
+        }
+    }
+    if (rx_n != 0u) {
+        _z_zephyr_serial_stats.rx_bytes += rx_n;
+        uint32_t held = ring_buf_size_get(&_z_serial_rx_ring);
+        if (held > _z_zephyr_serial_stats.ring_high_water) {
+            _z_zephyr_serial_stats.ring_high_water = held;
+        }
+        if (rx_wake || held >= (uint32_t)(_Z_ZEPHYR_SERIAL_RX_RING_BYTES / 2)) {
+            k_sem_give(&_z_serial_rx_sem);
+        }
+    }
+
+    /* TX only while its interrupt is enabled (TDRE is level and also true
+       while the ring is idle and TIE is off). */
+    if ((b->CTRL & LPUART_CTRL_TIE_MASK) == 0u || (b->STAT & LPUART_STAT_TDRE_MASK) == 0u) {
+        return;
+    }
+    uint32_t room = _z_serial_lpuart_txfifo - ((b->WATER & LPUART_WATER_TXCOUNT_MASK) >> LPUART_WATER_TXCOUNT_SHIFT);
+    uint32_t tx_n = 0;
+    while (room > 0u) {
+        uint8_t *data;
+        uint32_t n = ring_buf_get_claim(&_z_serial_tx_ring, &data, room);
+        if (n == 0u) {
+            (void)ring_buf_get_finish(&_z_serial_tx_ring, 0);
+            /* Disabled with the ring empty: the thread re-enables it after
+               its next put, as on the generic path. */
+            uart_irq_tx_disable(dev);
+            break;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            b->DATA = data[i];
+        }
+        (void)ring_buf_get_finish(&_z_serial_tx_ring, n);
+        tx_n += n;
+        room -= n;
+    }
+    if (tx_n != 0u) {
+        _z_zephyr_serial_tx_stats.irq_bytes += tx_n;
+        if (_z_serial_tx_waiting &&
+            ring_buf_space_get(&_z_serial_tx_ring) >= (uint32_t)(_Z_ZEPHYR_SERIAL_TX_RING_BYTES / 2)) {
+            k_sem_give(&_z_serial_tx_sem);
+        }
+    }
+}
+#endif /* _Z_ZEPHYR_SERIAL_FIFO_WATERMARK */
+
 /* Attach the ISR to `dev`. Idempotent for the SAME device so a reconnect does
    not have to tear down; refuses a second, different device rather than
    quietly rebinding the one link the buffer can represent. */
@@ -1257,6 +1449,14 @@ static bool _z_serial_rx_bind(const struct device *dev) {
     ring_buf_reset(&_z_serial_rx_ring);
     k_sem_reset(&_z_serial_rx_sem);
     _z_serial_rx_ring_full = false;
+#if defined(_Z_ZEPHYR_SERIAL_FIFO_WATERMARK)
+    /* I14: uart_configure() just reset WATER and FIFO; set them again. A
+       device that is not an LPUART keeps the generic ISR body. */
+    _z_serial_lpuart = _z_serial_lpuart_lookup(dev);
+    if (_z_serial_lpuart != NULL) {
+        _z_serial_lpuart_arm(_z_serial_lpuart);
+    }
+#endif
     uart_irq_rx_enable(dev);
     /* The same reasoning for TX: `uart_configure()` cleared the TX interrupt
        enable, and bytes a previous session left in the ring belong to a
