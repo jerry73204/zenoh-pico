@@ -1097,9 +1097,40 @@ static const struct device *_z_serial_rx_dev = NULL;
    from a UART overrun -- this one is OUR backlog, not the hardware's. */
 static volatile bool _z_serial_rx_ring_full = false;
 
+/* Set by a sender before it sleeps for TX room, cleared after; the ISR gives
+   the TX semaphore only while it is set. Giving on every drain (the old rule)
+   cost a k_sem_give per ISR while nobody waited, which with a ring larger
+   than a frame is almost always. */
+static volatile bool _z_serial_tx_waiting = false;
+
+#if defined(_Z_ZEPHYR_SERIAL_ISR_STATS)
+/* CONFIG_NROS_ZENOH_SERIAL_ISR_STATS (nano-ros phase-474 I13): cycles spent
+   in the serial ISR and the number of calls, so a profiler can charge ISR time
+   to whatever it interrupted (read the pair before and after). Off by
+   default: two k_cycle_get_32 per call. */
+volatile uint32_t _z_zephyr_serial_isr_cycles;
+volatile uint32_t _z_zephyr_serial_isr_calls;
+#endif
+
+static void _z_serial_isr_body(const struct device *dev);
+
 static void _z_serial_isr(const struct device *dev, void *user_data) {
     ARG_UNUSED(user_data);
+#if defined(_Z_ZEPHYR_SERIAL_ISR_STATS)
+    uint32_t t0 = k_cycle_get_32();
+    _z_serial_isr_body(dev);
+    _z_zephyr_serial_isr_cycles += k_cycle_get_32() - t0;
+    _z_zephyr_serial_isr_calls++;
+#else
+    _z_serial_isr_body(dev);
+#endif
+}
 
+/* About one call per byte at 921,600 baud on an LPUART (a 4-deep FIFO with
+   the watermarks at 0), so the body is kept to what the reader and the
+   senders need: the counters are accumulated locally and stored once per
+   call, not per FIFO read (nano-ros phase-474 I13). */
+static void _z_serial_isr_body(const struct device *dev) {
     /* The canonical Zephyr shape. An earlier version guarded the loop with
        `uart_irq_is_pending()` and `break`-ed when RX was not ready -- which
        can leave the interrupt ASSERTED and unhandled, because
@@ -1111,6 +1142,8 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
         return;
     }
 
+    uint32_t rx_n = 0;
+    bool rx_wake = false;
     while (uart_irq_rx_ready(dev)) {
         /* Drain the hardware FIFO in as few calls as possible: the mcux LPUART
            `fifo_read` loops while the RX register is full, so a large ask is
@@ -1121,20 +1154,26 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
             break;
         }
         uint32_t put = ring_buf_put(&_z_serial_rx_ring, chunk, (uint32_t)n);
-        _z_zephyr_serial_stats.rx_bytes += (uint32_t)n;
+        rx_n += (uint32_t)n;
         if (put < (uint32_t)n) {
             _z_serial_rx_ring_full = true;
             _z_zephyr_serial_stats.ring_overflows++;
-        }
-        uint32_t held = ring_buf_size_get(&_z_serial_rx_ring);
-        if (held > _z_zephyr_serial_stats.ring_high_water) {
-            _z_zephyr_serial_stats.ring_high_water = held;
+            rx_wake = true;
         }
         /* Wake the reader for a whole frame, not for a byte (see the note at
            the RX ring). A full ring wakes it too: it may be holding the end
            of a frame it cannot see yet. */
-        if (put < (uint32_t)n || memchr(chunk, 0x00, (size_t)n) != NULL ||
-            held >= (uint32_t)(_Z_ZEPHYR_SERIAL_RX_RING_BYTES / 2)) {
+        if (!rx_wake && memchr(chunk, 0x00, (size_t)n) != NULL) {
+            rx_wake = true;
+        }
+    }
+    if (rx_n != 0u) {
+        _z_zephyr_serial_stats.rx_bytes += rx_n;
+        uint32_t held = ring_buf_size_get(&_z_serial_rx_ring);
+        if (held > _z_zephyr_serial_stats.ring_high_water) {
+            _z_zephyr_serial_stats.ring_high_water = held;
+        }
+        if (rx_wake || held >= (uint32_t)(_Z_ZEPHYR_SERIAL_RX_RING_BYTES / 2)) {
             k_sem_give(&_z_serial_rx_sem);
         }
     }
@@ -1144,6 +1183,7 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
        otherwise fire forever). The thread re-enables it after it puts bytes.
        Single core, and this runs with the thread preempted, so "found empty"
        and "disabled" cannot be split by a put. */
+    uint32_t tx_n = 0;
     while (uart_irq_tx_ready(dev)) {
         uint8_t *data;
         uint32_t n = ring_buf_get_claim(&_z_serial_tx_ring, &data, _Z_ZEPHYR_SERIAL_TX_RING_BYTES);
@@ -1157,17 +1197,21 @@ static void _z_serial_isr(const struct device *dev, void *user_data) {
             w = 0;
         }
         (void)ring_buf_get_finish(&_z_serial_tx_ring, (uint32_t)w);
-        _z_zephyr_serial_tx_stats.irq_bytes += (uint32_t)w;
+        tx_n += (uint32_t)w;
+        if (w == 0) {
+            break;
+        }
+    }
+    if (tx_n != 0u) {
+        _z_zephyr_serial_tx_stats.irq_bytes += tx_n;
         /* The same rule as RX: wake a waiting sender when there is room for a
            RUN of bytes, not after every FIFO's worth. Giving per fill woke the
            sender every few bytes, two context switches each, in the band above
            the executor. Half the ring keeps the wire busy: the sender refills
            while the other half drains. */
-        if (ring_buf_space_get(&_z_serial_tx_ring) >= (uint32_t)(_Z_ZEPHYR_SERIAL_TX_RING_BYTES / 2)) {
+        if (_z_serial_tx_waiting &&
+            ring_buf_space_get(&_z_serial_tx_ring) >= (uint32_t)(_Z_ZEPHYR_SERIAL_TX_RING_BYTES / 2)) {
             k_sem_give(&_z_serial_tx_sem);
-        }
-        if (w == 0) {
-            break;
         }
     }
 }
@@ -1290,9 +1334,17 @@ static int _z_serial_tx_put(const struct device *dev, const uint8_t *data, size_
             _z_zephyr_serial_tx_stats.waits++;
             /* A "room was made" hint, like the RX sem: re-check the ring on
                every wake. A stale give from an earlier drain only costs one
-               extra loop. */
-            if (k_sem_take(&_z_serial_tx_sem, K_MSEC(_Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS)) != 0 &&
-                ring_buf_space_get(&_z_serial_tx_ring) == 0u) {
+               extra loop. The ISR gives only while `_z_serial_tx_waiting` is
+               set and only once half the ring is free, so set it first and
+               then look: room made before the flag was seen is found here,
+               room made after it is given. */
+            _z_serial_tx_waiting = true;
+            int rc = 0;
+            if (ring_buf_space_get(&_z_serial_tx_ring) < (uint32_t)(_Z_ZEPHYR_SERIAL_TX_RING_BYTES / 2)) {
+                rc = k_sem_take(&_z_serial_tx_sem, K_MSEC(_Z_ZEPHYR_SERIAL_TX_TIMEOUT_MS));
+            }
+            _z_serial_tx_waiting = false;
+            if (rc != 0 && ring_buf_space_get(&_z_serial_tx_ring) == 0u) {
                 _z_zephyr_serial_tx_stats.timeouts++;
                 return -1;
             }
