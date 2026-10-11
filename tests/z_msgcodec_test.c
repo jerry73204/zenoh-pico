@@ -18,6 +18,8 @@
 #include "zenoh-pico/protocol/codec/serial.h"
 #include "zenoh-pico/protocol/definitions/message.h"
 #include "zenoh-pico/protocol/definitions/transport.h"
+#include "zenoh-pico/utils/checksum.h"
+#include "zenoh-pico/utils/encoding.h"
 #include "zenoh-pico/utils/query_params.h"
 #define ZENOH_PICO_TEST_H
 
@@ -2211,6 +2213,132 @@ void test_buffer_too_small(void) {
     assert(deserialized_len == SIZE_MAX);
 }
 
+/* nano-ros I12: the serial CRC went table-driven and the serializer stopped
+   using a temporary buffer. Both are on the wire, so both are checked against
+   the code they replaced. */
+
+/* The serial link's sizes (zenoh-pico/system/link/serial.h, which is only
+   visible with Z_FEATURE_LINK_SERIAL). */
+#define T_SERIAL_MTU 1500
+#define T_SERIAL_MFS (T_SERIAL_MTU + 1 + 2 + 4)
+#define T_SERIAL_COBS 1516
+
+/* The bitwise CRC loop `_z_crc32` used to be. */
+static uint32_t ref_crc32_bitwise(const uint8_t *message, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc = crc ^ (uint32_t)message[i];
+        for (uint8_t j = 0; j < (uint8_t)8; j++) {
+            crc = (crc >> 1) ^ ((uint32_t)0x04C11DB7 & (uint32_t)(-(int32_t)(crc & (uint32_t)1)));
+        }
+    }
+    return ~crc;
+}
+
+/* The serializer as it was: copy into tmp, then `_z_cobs_encode`. */
+static size_t ref_serial_serialize(uint8_t *dest, const uint8_t *src, size_t src_len, uint8_t header) {
+    static uint8_t tmp[T_SERIAL_MFS];
+    uint32_t crc = ref_crc32_bitwise(src, src_len);
+    tmp[0] = header;
+    tmp[1] = (uint8_t)(src_len & 0xFF);
+    tmp[2] = (uint8_t)((src_len >> 8) & 0xFF);
+    if (src_len != 0) {
+        memcpy(&tmp[3], src, src_len);
+    }
+    tmp[3 + src_len] = (uint8_t)(crc & 0xFF);
+    tmp[4 + src_len] = (uint8_t)((crc >> 8) & 0xFF);
+    tmp[5 + src_len] = (uint8_t)((crc >> 16) & 0xFF);
+    tmp[6 + src_len] = (uint8_t)((crc >> 24) & 0xFF);
+    size_t n = _z_cobs_encode(tmp, src_len + 7, dest);
+    dest[n] = 0x00;
+    return n + 1;
+}
+
+void test_serial_crc32_table(void) {
+    /* Not the standard CRC-32 (that gives 0xCBF43926): the loop shifts right
+       with the unreflected polynomial, and the wire carries exactly that. */
+    const uint8_t check[] = "123456789";
+    assert(_z_crc32(check, 9) == 0xFC4F2BE9u);
+    assert(ref_crc32_bitwise(check, 9) == 0xFC4F2BE9u);
+    assert(_z_crc32(check, 0) == 0x00000000u);
+
+    uint8_t buf[1024];
+    uint32_t x = 0x12345678u;
+    for (size_t i = 0; i < sizeof(buf); i++) {
+        x = x * 1103515245u + 12345u;
+        buf[i] = (uint8_t)(x >> 16);
+    }
+    for (size_t len = 0; len <= sizeof(buf); len += 7) {
+        assert(_z_crc32(buf, len) == ref_crc32_bitwise(buf, len));
+    }
+    for (size_t b = 0; b < 256; b++) {
+        uint8_t one = (uint8_t)b;
+        assert(_z_crc32(&one, 1) == ref_crc32_bitwise(&one, 1));
+    }
+}
+
+static void check_serial_direct_matches_ref(const uint8_t *src, size_t src_len, uint8_t header) {
+    static uint8_t got[T_SERIAL_COBS + 16];
+    static uint8_t want[T_SERIAL_COBS + 16];
+    static uint8_t back[T_SERIAL_MTU];
+    static uint8_t tmp[T_SERIAL_COBS];
+    size_t want_len = ref_serial_serialize(want, src, src_len, header);
+    size_t got_len = _z_serial_msg_serialize_direct(got, T_SERIAL_COBS, src, src_len, header);
+    assert(want_len <= T_SERIAL_COBS);
+    assert(got_len == want_len);
+    assert(memcmp(got, want, got_len) == 0);
+
+    /* The legacy entry point now routes through the direct encoder. */
+    got_len = _z_serial_msg_serialize(got, T_SERIAL_COBS, src, src_len, header, tmp, T_SERIAL_MFS);
+    assert(got_len == want_len);
+    assert(memcmp(got, want, got_len) == 0);
+
+    /* Round trip, and one byte short of room must fail rather than overrun. */
+    uint8_t h = 0;
+    size_t n = _z_serial_msg_deserialize(got, got_len, back, sizeof(back), &h, tmp, sizeof(tmp));
+    assert(n == src_len);
+    assert(h == header);
+    assert(src_len == 0 || memcmp(back, src, src_len) == 0);
+    memset(got, 0xA5, sizeof(got));
+    assert(_z_serial_msg_serialize_direct(got, want_len - 1, src, src_len, header) == SIZE_MAX);
+    for (size_t i = want_len - 1; i < sizeof(got); i++) {
+        assert(got[i] == 0xA5);
+    }
+}
+
+void test_serial_direct_matches_ref(void) {
+    static uint8_t buf[T_SERIAL_MTU];
+    /* Empty (the INIT/handshake frames), and the edge cases of COBS: runs of
+       non-zero bytes at and around the 254-byte block length, all zeros, and
+       a zero at either end. */
+    check_serial_direct_matches_ref(NULL, 0, 0x01);
+    const size_t lens[] = {1, 2, 250, 251, 252, 253, 254, 255, 256, 507, 508, 509, 1000, T_SERIAL_MTU};
+    for (size_t k = 0; k < sizeof(lens) / sizeof(lens[0]); k++) {
+        size_t len = lens[k];
+        memset(buf, 0x5A, len);
+        check_serial_direct_matches_ref(buf, len, 0x00);
+        check_serial_direct_matches_ref(buf, len, 0xAB);
+        memset(buf, 0x00, len);
+        check_serial_direct_matches_ref(buf, len, 0x00);
+        memset(buf, 0x11, len);
+        buf[0] = 0x00;
+        check_serial_direct_matches_ref(buf, len, 0x02);
+        buf[0] = 0x11;
+        buf[len - 1] = 0x00;
+        check_serial_direct_matches_ref(buf, len, 0x02);
+    }
+    /* Pseudo-random payloads of every length up to 600, mixed zero density. */
+    uint32_t x = 0xC0FFEEu;
+    for (size_t len = 0; len <= 600; len++) {
+        for (size_t i = 0; i < len; i++) {
+            x = x * 1103515245u + 12345u;
+            uint8_t r = (uint8_t)(x >> 16);
+            buf[i] = ((x >> 8) % 23u == 0u) ? 0x00 : r;
+        }
+        check_serial_direct_matches_ref(buf, len, (uint8_t)len);
+    }
+}
+
 static _z_network_message_t make_specific_net_msg(uint8_t which) {
     switch (which) {
         case 0:
@@ -2368,6 +2496,8 @@ int main(void) {
     // Serial serialization
     test_serialize_deserialize();
     test_crc_mismatch();
+    test_serial_crc32_table();
+    test_serial_direct_matches_ref();
     test_buffer_too_small();
 
     // Ensure that we can decode a sequence of messages reusing the same decoded object
