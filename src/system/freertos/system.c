@@ -15,6 +15,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -356,6 +357,83 @@ z_result_t _z_condvar_signal_all(_z_condvar_t *cv) {
     return _Z_RES_OK;
 }
 
+#ifdef Z_FEATURE_NROS_BOUNDED_CONDVAR_WAIT
+/* nano-ros (phase-502 W2, issue 1196): no wait in the image may be unbounded.
+ * `_z_condvar_wait` waits at most one slice on the semaphore and reports an
+ * expired slice as a spurious wakeup (`_Z_RES_OK`). Every caller loops on its
+ * predicate, so no caller's behaviour changes; what the slice buys is that a
+ * lost signal costs one slice instead of the thread. The slice matches the
+ * one nano-ros's alias shim uses for every other platform. */
+#ifndef Z_NROS_CONDVAR_WAIT_SLICE_MS
+#define Z_NROS_CONDVAR_WAIT_SLICE_MS 1000u
+#endif
+
+/* The slice in ticks, rounded UP so a wait never returns before the slice
+ * elapsed (issue 1906's rule), at least one tick, and clamped strictly below
+ * `portMAX_DELAY`, which FreeRTOS reads as "forever" when
+ * `INCLUDE_vTaskSuspend` is set. */
+static TickType_t _z_nros_condvar_slice_ticks(void) {
+    uint64_t ticks = ((uint64_t)Z_NROS_CONDVAR_WAIT_SLICE_MS * (uint64_t)configTICK_RATE_HZ + 999u) / 1000u;
+    if (ticks == 0u) {
+        ticks = 1u;
+    }
+    if (ticks >= (uint64_t)portMAX_DELAY) {
+        ticks = (uint64_t)portMAX_DELAY - 1u;
+    }
+    return (TickType_t)ticks;
+}
+
+/* Deregister a waiter whose take on `cv->sem` timed out. Returns true when a
+ * signal raced the timeout and was absorbed instead.
+ *
+ * A signaller gives the semaphore AND decrements `waiters` for the waiter it
+ * wakes, both under `cv->mutex`. Between this waiter's take timing out and it
+ * acquiring `cv->mutex` here, a signaller may already have done both on its
+ * behalf. A bare `waiters--` would then count this waiter out twice (the count
+ * goes negative, or it erases another waiter's registration) and strand the
+ * token in the semaphore, where it spuriously wakes the next waiter.
+ *
+ * Under `cv->mutex` the state is consistent: every registered waiter that has
+ * not left is counted either in `waiters` or by one token in the semaphore.
+ * So: if a token is there, take it (the signaller has already deregistered a
+ * waiter), else decrement `waiters`. Tokens are interchangeable, so if the
+ * token was meant for another blocked waiter, that waiter is still counted in
+ * `waiters` and still blocked, and the signal was delivered to this one —
+ * which a condition variable's "wakes at least one waiter" permits. */
+static bool _z_condvar_timeout_deregister(_z_condvar_t *cv) {
+    bool absorbed;
+    xSemaphoreTake(cv->mutex, portMAX_DELAY);
+    if (xSemaphoreTake(cv->sem, 0) == pdTRUE) {
+        absorbed = true;
+    } else {
+        cv->waiters--;
+        absorbed = false;
+    }
+    xSemaphoreGive(cv->mutex);
+    return absorbed;
+}
+
+z_result_t _z_condvar_wait(_z_condvar_t *cv, _z_mutex_t *m) {
+    if (!cv || !m) {
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
+
+    xSemaphoreTake(cv->mutex, portMAX_DELAY);
+    cv->waiters++;
+    xSemaphoreGive(cv->mutex);
+
+    _z_mutex_unlock(m);
+
+    if (xSemaphoreTake(cv->sem, _z_nros_condvar_slice_ticks()) != pdTRUE) {
+        /* Signalled or not, the caller re-checks its predicate. */
+        (void)_z_condvar_timeout_deregister(cv);
+    }
+
+    _z_mutex_lock(m);
+
+    return _Z_RES_OK;
+}
+#else
 z_result_t _z_condvar_wait(_z_condvar_t *cv, _z_mutex_t *m) {
     if (!cv || !m) {
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
@@ -373,6 +451,7 @@ z_result_t _z_condvar_wait(_z_condvar_t *cv, _z_mutex_t *m) {
 
     return _Z_RES_OK;
 }
+#endif /* Z_FEATURE_NROS_BOUNDED_CONDVAR_WAIT */
 
 z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_t *abstime) {
     if (!cv || !m) {
@@ -391,6 +470,17 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
 
     bool timed_out = xSemaphoreTake(cv->sem, block_duration) == pdFALSE;
 
+#ifdef Z_FEATURE_NROS_BOUNDED_CONDVAR_WAIT
+    /* Same race as `_z_condvar_wait`'s slice: a signal that landed between the
+     * timeout and the deregistration is absorbed and reported as a wake. */
+    if (timed_out && _z_condvar_timeout_deregister(cv)) {
+        timed_out = false;
+    }
+
+    _z_mutex_lock(m);
+
+    return timed_out ? Z_ETIMEDOUT : _Z_RES_OK;
+#else
     _z_mutex_lock(m);
 
     if (timed_out) {
@@ -401,6 +491,7 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
     }
 
     return _Z_RES_OK;
+#endif /* Z_FEATURE_NROS_BOUNDED_CONDVAR_WAIT */
 }
 #endif  // Z_MULTI_THREAD == 1
 
