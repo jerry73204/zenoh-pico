@@ -15,6 +15,14 @@
 #include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/utils/logging.h"
 
+/* ThreadX counts TX_TIMER_TICKS_PER_SECOND ticks a second, 100 by default, so
+ * every conversion multiplies before it divides: TX_TIMER_TICKS_PER_SECOND /
+ * 1000 is 0 at the default rate. Durations round UP to whole ticks, so a sleep
+ * or a deadline is never shorter than asked for. */
+static uint64_t _z_ticks_to_ms(ULONG ticks) { return (uint64_t)ticks * 1000u / TX_TIMER_TICKS_PER_SECOND; }
+
+static ULONG _z_us_to_ticks_ceil(uint64_t us) { return (ULONG)((us * TX_TIMER_TICKS_PER_SECOND + 999999u) / 1000000u); }
+
 /* pointer to threadx byte pool, should be provided by application */
 extern TX_BYTE_POOL *pthreadx_byte_pool;
 
@@ -231,7 +239,7 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
      * block time at or below half the range also keeps it below
      * TX_WAIT_FOREVER. */
     ULONG target_time =
-        (ULONG)((abstime->tv_sec * 1000 + abstime->tv_nsec / 1000000) * (TX_TIMER_TICKS_PER_SECOND / 1000));
+        _z_us_to_ticks_ceil((uint64_t)abstime->tv_sec * 1000000u + ((uint64_t)abstime->tv_nsec + 999u) / 1000u);
     ULONG remaining = (ULONG)(target_time - tx_time_get());
     ULONG block_duration = (remaining <= (ULONG)(TX_WAIT_FOREVER / 2u)) ? remaining : 0;
 
@@ -258,26 +266,26 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
 
 /*------------------ Sleep ------------------*/
 z_result_t z_sleep_us(size_t time) {
-    tx_thread_sleep(time * TX_TIMER_TICKS_PER_SECOND / 1000000);
+    tx_thread_sleep(_z_us_to_ticks_ceil((uint64_t)time));
     return 0;
 }
 
 z_result_t z_sleep_ms(size_t time) {
-    tx_thread_sleep(time * TX_TIMER_TICKS_PER_SECOND / 1000);
+    tx_thread_sleep(_z_us_to_ticks_ceil((uint64_t)time * 1000u));
     return 0;
 }
 
 z_result_t z_sleep_s(size_t time) {
-    tx_thread_sleep(time * TX_TIMER_TICKS_PER_SECOND);
+    tx_thread_sleep((ULONG)((uint64_t)time * TX_TIMER_TICKS_PER_SECOND));
     return 0;
 }
 
 /*------------------ Clock ------------------*/
 
 void __z_clock_gettime(z_clock_t *ts) {
-    uint64_t ms = tx_time_get() * (TX_TIMER_TICKS_PER_SECOND / 1000);
+    uint64_t ms = _z_ticks_to_ms(tx_time_get());
     ts->tv_sec = ms / (uint64_t)1000;
-    ts->tv_nsec = (ms % (uint64_t)1000) * (uint64_t)1000;
+    ts->tv_nsec = (ms % (uint64_t)1000) * (uint64_t)1000000;
 }
 
 z_clock_t z_clock_now(void) {
@@ -359,7 +367,7 @@ unsigned long z_time_elapsed_ms(z_time_t *time) {
     return (tx_time_get() - *time) * 1000ULL / TX_TIMER_TICKS_PER_SECOND;
 }
 
-unsigned long z_time_elapsed_s(z_time_t *time) { return (tx_time_get() - *time) * TX_TIMER_TICKS_PER_SECOND; }
+unsigned long z_time_elapsed_s(z_time_t *time) { return (tx_time_get() - *time) / TX_TIMER_TICKS_PER_SECOND; }
 
 z_result_t _z_get_time_since_epoch(_z_time_since_epoch *t) {
     ULONG64 time_ns = tx_time_get() * 1000000000ULL / TX_TIMER_TICKS_PER_SECOND;
