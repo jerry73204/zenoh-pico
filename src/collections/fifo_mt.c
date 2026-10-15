@@ -78,9 +78,9 @@ z_result_t _z_fifo_mt_push(const void *elem, void *context, z_element_free_f ele
     while (elem != NULL) {
         elem = _z_fifo_push(&f->_fifo, (void *)elem);
         if (elem != NULL) {
-            _Z_RETURN_IF_ERR(_z_condvar_wait(&f->_cv_not_full, &f->_mutex))
+            _Z_CLEAN_RETURN_IF_ERR(_z_condvar_wait(&f->_cv_not_full, &f->_mutex), _z_mutex_unlock(&f->_mutex))
         } else {
-            _Z_RETURN_IF_ERR(_z_condvar_signal(&f->_cv_not_empty))
+            _Z_CLEAN_RETURN_IF_ERR(_z_condvar_signal(&f->_cv_not_empty), _z_mutex_unlock(&f->_mutex))
         }
     }
     _Z_RETURN_IF_ERR(_z_mutex_unlock(&f->_mutex))
@@ -95,7 +95,7 @@ z_result_t _z_fifo_mt_close(_z_fifo_mt_t *fifo) {
 #if Z_FEATURE_MULTI_THREAD == 1
     _Z_RETURN_IF_ERR(_z_mutex_lock(&fifo->_mutex))
     fifo->is_closed = true;
-    _Z_RETURN_IF_ERR(_z_condvar_signal_all(&fifo->_cv_not_empty))
+    _Z_CLEAN_RETURN_IF_ERR(_z_condvar_signal_all(&fifo->_cv_not_empty), _z_mutex_unlock(&fifo->_mutex))
     _Z_RETURN_IF_ERR(_z_mutex_unlock(&fifo->_mutex))
 #else
     fifo->is_closed = true;
@@ -113,9 +113,9 @@ z_result_t _z_fifo_mt_pull(void *dst, void *context, z_element_move_f element_mo
         src = _z_fifo_pull(&f->_fifo);
         if (src == NULL) {
             if (f->is_closed) break;
-            _Z_RETURN_IF_ERR(_z_condvar_wait(&f->_cv_not_empty, &f->_mutex))
+            _Z_CLEAN_RETURN_IF_ERR(_z_condvar_wait(&f->_cv_not_empty, &f->_mutex), _z_mutex_unlock(&f->_mutex))
         } else {
-            _Z_RETURN_IF_ERR(_z_condvar_signal(&f->_cv_not_full))
+            _Z_CLEAN_RETURN_IF_ERR(_z_condvar_signal(&f->_cv_not_full), _z_mutex_unlock(&f->_mutex))
         }
     }
     _Z_RETURN_IF_ERR(_z_mutex_unlock(&f->_mutex))
@@ -141,7 +141,7 @@ z_result_t _z_fifo_mt_try_pull(void *dst, void *context, z_element_move_f elemen
     _Z_RETURN_IF_ERR(_z_mutex_lock(&f->_mutex))
     src = _z_fifo_pull(&f->_fifo);
     if (src != NULL) {
-        _Z_RETURN_IF_ERR(_z_condvar_signal(&f->_cv_not_full))
+        _Z_CLEAN_RETURN_IF_ERR(_z_condvar_signal(&f->_cv_not_full), _z_mutex_unlock(&f->_mutex))
     }
     _Z_RETURN_IF_ERR(_z_mutex_unlock(&f->_mutex))
 #else   // Z_FEATURE_MULTI_THREAD == 1

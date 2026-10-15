@@ -48,7 +48,8 @@ z_result_t _z_sync_group_wait(_z_sync_group_t* sync_group) {
 #if Z_FEATURE_MULTI_THREAD == 1
     _Z_RETURN_IF_ERR(_z_mutex_lock(&state->counter_mutex));
     while (!state->is_closed && !__unsafe_z_sync_group_has_no_alive_notifiers(sync_group)) {
-        _Z_RETURN_IF_ERR(_z_condvar_wait(&state->counter_condvar, &state->counter_mutex));
+        _Z_CLEAN_RETURN_IF_ERR(_z_condvar_wait(&state->counter_condvar, &state->counter_mutex),
+                               _z_mutex_unlock(&state->counter_mutex));
     }
     z_result_t ret = _Z_RES_OK;
     if (state->is_closed) {
@@ -100,6 +101,7 @@ z_result_t _z_sync_group_wait_deadline(_z_sync_group_t* sync_group, const z_cloc
         if (ret == Z_ETIMEDOUT) {
             break;
         } else if (ret != _Z_RES_OK) {
+            _z_mutex_unlock(&state->counter_mutex);
             return ret;
         }
     }

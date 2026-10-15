@@ -886,6 +886,23 @@ if(UNIX OR MSVC)
     target_compile_definitions(z_test_fragment_decode_error_transport_zbuf PRIVATE Z_TEST_HOOKS=1)
     target_link_libraries(z_test_fragment_reliability zenohpico::lib)
 
+    # The collections must release their mutex when a condvar call fails. The
+    # test injects the failure with the GNU linker's --wrap, which only reaches
+    # calls from objects linked into the executable, so it compiles the
+    # collection sources itself rather than reaching them through the library.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      add_executable(z_collections_mt_unlock_test
+        ${PROJECT_SOURCE_DIR}/tests/z_collections_mt_unlock_test.c
+        ${PROJECT_SOURCE_DIR}/src/collections/fifo_mt.c
+        ${PROJECT_SOURCE_DIR}/src/collections/ring_mt.c
+        ${PROJECT_SOURCE_DIR}/src/collections/sync_group.c)
+      target_link_libraries(z_collections_mt_unlock_test zenohpico::lib)
+      target_link_options(z_collections_mt_unlock_test PRIVATE
+        -Wl,--wrap=_z_condvar_wait -Wl,--wrap=_z_condvar_wait_until
+        -Wl,--wrap=_z_condvar_signal -Wl,--wrap=_z_condvar_signal_all)
+      add_test(z_collections_mt_unlock_test ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/z_collections_mt_unlock_test)
+    endif()
+
     configure_file(${PROJECT_SOURCE_DIR}/tests/modularity.py ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/modularity.py COPYONLY)
     configure_file(${PROJECT_SOURCE_DIR}/tests/raweth.py ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/raweth.py COPYONLY)
     configure_file(${PROJECT_SOURCE_DIR}/tests/fragment.py ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/fragment.py COPYONLY)
