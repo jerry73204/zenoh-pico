@@ -221,9 +221,19 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
     }
 
-    ULONG now = tx_time_get();
-    ULONG target_time = (abstime->tv_sec * 1000 + abstime->tv_nsec / 1000000) * (TX_TIMER_TICKS_PER_SECOND / 1000);
-    ULONG block_duration = (target_time > now) ? (target_time - now) : 0;
+    /* z_clock_now() is built from tx_time_get(), which wraps, and the
+     * deadline is truncated back to ULONG here, so compare in modular
+     * arithmetic. A deadline more than half the tick range ahead is one that
+     * has already passed: the counter wrapped between computing it and
+     * waiting. Comparing the raw values instead reads a deadline set just
+     * before a wrap as about one full tick range in the future (49.7 days at
+     * 1 kHz), and one set just after a wrap as already expired. Keeping the
+     * block time at or below half the range also keeps it below
+     * TX_WAIT_FOREVER. */
+    ULONG target_time =
+        (ULONG)((abstime->tv_sec * 1000 + abstime->tv_nsec / 1000000) * (TX_TIMER_TICKS_PER_SECOND / 1000));
+    ULONG remaining = (ULONG)(target_time - tx_time_get());
+    ULONG block_duration = (remaining <= (ULONG)(TX_WAIT_FOREVER / 2u)) ? remaining : 0;
 
     tx_mutex_get(&cv->mutex, TX_WAIT_FOREVER);
     cv->waiters++;

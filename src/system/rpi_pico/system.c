@@ -235,9 +235,17 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
     }
 
-    TickType_t now = xTaskGetTickCount();
+    /* z_clock_now() is built from the tick count, which wraps, and the
+     * deadline is truncated back to TickType_t here, so compare in modular
+     * arithmetic. A deadline more than half the tick range ahead is one that
+     * has already passed: the counter wrapped between computing it and
+     * waiting. Comparing the raw values instead reads a deadline set just
+     * before a wrap as about one full tick range in the future (49.7 days at
+     * 1 kHz with 32-bit ticks), and one set just after a wrap as already
+     * expired. */
     TickType_t target_time = pdMS_TO_TICKS(abstime->tv_sec * 1000 + abstime->tv_nsec / 1000000);
-    TickType_t block_duration = (target_time > now) ? (target_time - now) : 0;
+    TickType_t remaining = (TickType_t)(target_time - xTaskGetTickCount());
+    TickType_t block_duration = (remaining <= (TickType_t)(portMAX_DELAY / 2u)) ? remaining : 0;
 
     xSemaphoreTake(cv->mutex, portMAX_DELAY);
     cv->waiters++;
