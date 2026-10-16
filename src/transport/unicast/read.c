@@ -415,6 +415,38 @@ static z_result_t _zp_unicast_process_peer_event(_z_transport_unicast_t *ztu) {
 }
 #endif
 
+/*
+ * nano-ros (RFC-0074, phase-462 W6a) -- a budget on the read TASK.
+ *
+ * Unset, the read task drains the socket for as long as frames arrive: each
+ * poll that finds data returns `continue`, so the executor runs it again at
+ * once and a flood holds the CPU for one contiguous run (100-340 ms measured
+ * on FreeRTOS mps2-an385 on the 1.8.0 line) while every task below it stalls.
+ * Defined, the task processes at most Z_RX_TASK_BUDGET_FRAMES consecutive
+ * polls with data, then yields with `wake_up_after`, which bounds its
+ * contiguous occupancy at FRAMES x (per-poll cost).
+ *
+ * This DEFERS, it does not drop: the bytes stay in the socket and TCP
+ * backpressures the sender. A budget of 0 is refused: it is not "unlimited".
+ *
+ * The rest is Z_RX_TASK_BUDGET_REST_US, rounded up to whole milliseconds and
+ * never below 2: the background executor only waits when the next wake-up is
+ * more than 1 ms away (`_z_background_executor_run`), so a 1 ms rest would
+ * not rest at all.
+ */
+#if defined(Z_RX_TASK_BUDGET_FRAMES)
+#if (Z_RX_TASK_BUDGET_FRAMES) < 1
+#error "Z_RX_TASK_BUDGET_FRAMES must be >= 1 (leave it undefined for an unbounded read task)"
+#endif
+#ifndef Z_RX_TASK_BUDGET_REST_US
+#define Z_RX_TASK_BUDGET_REST_US 2000
+#endif
+#define _Z_RX_TASK_BUDGET_REST_MS \
+    (((Z_RX_TASK_BUDGET_REST_US) + 999) / 1000 < 2 ? 2 : ((Z_RX_TASK_BUDGET_REST_US) + 999) / 1000)
+// One client transport per session, and the read task is its only reader.
+static unsigned int _z_rx_task_budget_used = 0;
+#endif
+
 _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *executor) {
     _z_transport_unicast_t *ztu = (_z_transport_unicast_t *)ztu_arg;
     if (ztu->_common._state == _Z_TRANSPORT_STATE_CLOSED) {
@@ -431,6 +463,9 @@ _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *execut
         // Retrieve data
         if (!_z_unicast_client_read(ztu, curr_peer, &to_read)) {
             // nothing to read
+#if defined(Z_RX_TASK_BUDGET_FRAMES)
+            _z_rx_task_budget_used = 0;
+#endif
 #if Z_RUNTIME_IDLE_READ_TASK_SLEEP > 0
             return _z_fut_fn_result_wake_up_after(Z_RUNTIME_IDLE_READ_TASK_SLEEP);
 #else
@@ -441,6 +476,12 @@ _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *execut
             _Z_INFO("Read task failed, closing session\n");
             return _zp_unicast_failed_result(ztu, executor);
         }
+#if defined(Z_RX_TASK_BUDGET_FRAMES)
+        if (++_z_rx_task_budget_used >= (unsigned int)(Z_RX_TASK_BUDGET_FRAMES)) {
+            _z_rx_task_budget_used = 0;
+            return _z_fut_fn_result_wake_up_after((unsigned long)_Z_RX_TASK_BUDGET_REST_MS);
+        }
+#endif
     }
 #if Z_FEATURE_UNICAST_PEER == 1
     if (mode == Z_WHATAMI_PEER) {
