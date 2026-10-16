@@ -19,9 +19,37 @@
  * every conversion multiplies before it divides: TX_TIMER_TICKS_PER_SECOND /
  * 1000 is 0 at the default rate. Durations round UP to whole ticks, so a sleep
  * or a deadline is never shorter than asked for. */
-static uint64_t _z_ticks_to_ms(ULONG ticks) { return (uint64_t)ticks * 1000u / TX_TIMER_TICKS_PER_SECOND; }
+static uint64_t _z_ticks_to_ms(uint64_t ticks) { return ticks * 1000u / TX_TIMER_TICKS_PER_SECOND; }
 
-static ULONG _z_us_to_ticks_ceil(uint64_t us) { return (ULONG)((us * TX_TIMER_TICKS_PER_SECOND + 999999u) / 1000000u); }
+static uint64_t _z_us_to_ticks64_ceil(uint64_t us) { return (us * TX_TIMER_TICKS_PER_SECOND + 999999u) / 1000000u; }
+
+static ULONG _z_us_to_ticks_ceil(uint64_t us) { return (ULONG)_z_us_to_ticks64_ceil(us); }
+
+/* tx_time_get() is a 32-bit counter, so it wraps: every 497 days at the
+ * default 100 Hz, every 49.7 days at 1 kHz. z_clock_t is absolute time, so a
+ * clock read straight from it jumps back to 0 at the wrap, and every deadline
+ * and elapsed time spanning it is wrong. Extend it to 64 bits by counting the
+ * wraps: a reading below the previous one means the counter wrapped since.
+ * That holds as long as the clock is read at least once per wrap period, which
+ * zenoh-pico's lease and read tasks do many times a second. The read and the
+ * update run with interrupts disabled, so two threads cannot both count one
+ * wrap, and neither can save a stale reading over a newer one. */
+static uint64_t _z_ticks64(void) {
+    if (sizeof(ULONG) >= sizeof(uint64_t)) {
+        return (uint64_t)tx_time_get(); /* an LP64 port: ULONG is already 64 bits */
+    }
+    static ULONG last_ticks = 0;
+    static ULONG wraps = 0;
+    UINT posture = tx_interrupt_control(TX_INT_DISABLE);
+    ULONG now = tx_time_get();
+    if (now < last_ticks) {
+        wraps++;
+    }
+    last_ticks = now;
+    uint64_t ticks = ((uint64_t)wraps << 32) | (uint64_t)now;
+    tx_interrupt_control(posture);
+    return ticks;
+}
 
 /* pointer to threadx byte pool, should be provided by application */
 extern TX_BYTE_POOL *pthreadx_byte_pool;
@@ -229,19 +257,16 @@ z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
     }
 
-    /* z_clock_now() is built from tx_time_get(), which wraps, and the
-     * deadline is truncated back to ULONG here, so compare in modular
-     * arithmetic. A deadline more than half the tick range ahead is one that
-     * has already passed: the counter wrapped between computing it and
-     * waiting. Comparing the raw values instead reads a deadline set just
-     * before a wrap as about one full tick range in the future (49.7 days at
-     * 1 kHz), and one set just after a wrap as already expired. Keeping the
-     * block time at or below half the range also keeps it below
-     * TX_WAIT_FOREVER. */
-    ULONG target_time =
-        _z_us_to_ticks_ceil((uint64_t)abstime->tv_sec * 1000000u + ((uint64_t)abstime->tv_nsec + 999u) / 1000u);
-    ULONG remaining = (ULONG)(target_time - tx_time_get());
-    ULONG block_duration = (remaining <= (ULONG)(TX_WAIT_FOREVER / 2u)) ? remaining : 0;
+    /* abstime comes from z_clock_now(), which reads the 64-bit tick count, so
+     * the deadline is compared there too and never in the wrapping 32-bit
+     * counter. A deadline already passed blocks for 0 ticks. A wait longer than
+     * ThreadX can express is capped just below TX_WAIT_FOREVER, so it times out
+     * early (after 497 days at 100 Hz) rather than blocking forever. */
+    uint64_t target_time =
+        _z_us_to_ticks64_ceil((uint64_t)abstime->tv_sec * 1000000u + ((uint64_t)abstime->tv_nsec + 999u) / 1000u);
+    uint64_t now = _z_ticks64();
+    uint64_t remaining = target_time > now ? target_time - now : 0;
+    ULONG block_duration = remaining < (uint64_t)TX_WAIT_FOREVER ? (ULONG)remaining : (ULONG)(TX_WAIT_FOREVER - 1u);
 
     tx_mutex_get(&cv->mutex, TX_WAIT_FOREVER);
     cv->waiters++;
@@ -283,7 +308,7 @@ z_result_t z_sleep_s(size_t time) {
 /*------------------ Clock ------------------*/
 
 void __z_clock_gettime(z_clock_t *ts) {
-    uint64_t ms = _z_ticks_to_ms(tx_time_get());
+    uint64_t ms = _z_ticks_to_ms(_z_ticks64());
     ts->tv_sec = ms / (uint64_t)1000;
     ts->tv_nsec = (ms % (uint64_t)1000) * (uint64_t)1000000;
 }
