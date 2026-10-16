@@ -403,8 +403,35 @@ static z_result_t _zp_unicast_process_peer_event(_z_transport_unicast_t *ztu) {
     return _Z_RES_OK;
 }
 
+/*
+ * nano-ros (RFC-0074, phase-462 W6a) -- a budget on the read TASK.
+ *
+ * Unset, the task drains the socket for as long as frames arrive, so a flood
+ * holds the CPU for one contiguous run (100-340 ms measured on FreeRTOS
+ * mps2-an385) and every tier below it stalls. Defined, the task processes at
+ * most Z_RX_TASK_BUDGET_FRAMES frames back to back and then sleeps
+ * Z_RX_TASK_BUDGET_REST_US, which bounds its contiguous occupancy at
+ * FRAMES x (per-frame cost).
+ *
+ * This DEFERS, it does not drop: the zbuf is reset once above the loop, so
+ * the bytes stay in the socket and TCP backpressures the sender. `_mutex_rx`
+ * is held for the task's whole life and has no other locker, so sleeping
+ * under it blocks nothing. A budget of 0 is refused: it is not "unlimited".
+ */
+#if defined(Z_RX_TASK_BUDGET_FRAMES)
+#if (Z_RX_TASK_BUDGET_FRAMES) < 1
+#error "Z_RX_TASK_BUDGET_FRAMES must be >= 1 (leave it undefined for an unbounded read task)"
+#endif
+#ifndef Z_RX_TASK_BUDGET_REST_US
+#define Z_RX_TASK_BUDGET_REST_US 1000
+#endif
+#endif
+
 void *_zp_unicast_read_task(void *ztu_arg) {
     _z_transport_unicast_t *ztu = (_z_transport_unicast_t *)ztu_arg;
+#if defined(Z_RX_TASK_BUDGET_FRAMES)
+    unsigned int budget_frames = 0;
+#endif
 
     // Acquire and keep the lock
     _z_mutex_lock(&ztu->_common._mutex_rx);
@@ -449,6 +476,12 @@ void *_zp_unicast_read_task(void *ztu_arg) {
                 continue;
             }
         }
+#if defined(Z_RX_TASK_BUDGET_FRAMES)
+        if (++budget_frames >= (unsigned int)(Z_RX_TASK_BUDGET_FRAMES)) {
+            budget_frames = 0;
+            z_sleep_us(Z_RX_TASK_BUDGET_REST_US);
+        }
+#endif
     }
     _z_mutex_unlock(&ztu->_common._mutex_rx);
     return NULL;
