@@ -22,6 +22,7 @@
 #include "zenoh-pico/link/endpoint.h"
 #include "zenoh-pico/link/manager.h"
 #include "zenoh-pico/link/transport/custom.h"
+#include "zenoh-pico/system/common/platform.h"
 #include "zenoh-pico/utils/pointers.h"
 
 #if Z_FEATURE_LINK_CUSTOM == 1
@@ -104,15 +105,38 @@ size_t _z_f_link_read_exact_custom(const _z_link_t *self, uint8_t *ptr, size_t l
                                    _z_slice_t *addr, _z_sys_net_socket_t *socket) {
     _ZP_UNUSED(addr);
     _ZP_UNUSED(socket);
-    /* Loop until len bytes received or read returns 0/error. */
+    /* The handshake reads a WHOLE message through here
+     * (`_z_link_recv_t_msg`: the 2-byte length, then the body), so a
+     * read that finds nothing yet is not the end of the message. It
+     * used to be: the loop stopped at the first 0, and every `read`
+     * was asked to wait 0 ms, so session open failed whenever the
+     * peer's InitAck/OpenAck was not ALREADY buffered when we looked —
+     * `ConnectionFailed` under load, a pass on an idle host
+     * (nano-ros `custom_transport_loopback`, tier 1 on a busy runner).
+     *
+     * Wait for the rest instead, with each gap bounded by
+     * Z_CONFIG_SOCKET_TIMEOUT — the bound SO_RCVTIMEO gives a TCP
+     * link's read_exact, which also loops per recv. Negative is still
+     * fatal (the user signalled error / peer close). The poll path
+     * (`_z_f_link_read_custom`) keeps its 0 ms ask: the rx loop there
+     * already tolerates a partial message and comes back. */
     size_t got = 0;
+    z_clock_t gap_start = z_clock_now();
     while (got < len) {
-        int32_t r = self->_socket._custom._ops.read(self->_socket._custom._ops.user_data,
-                                                     ptr + got, len - got, 0u);
-        if (r <= 0) {
+        unsigned long waited = z_clock_elapsed_ms(&gap_start);
+        if (waited >= (unsigned long)Z_CONFIG_SOCKET_TIMEOUT) {
             break;
         }
-        got += (size_t)r;
+        int32_t r = self->_socket._custom._ops.read(
+            self->_socket._custom._ops.user_data, ptr + got, len - got,
+            (uint32_t)((unsigned long)Z_CONFIG_SOCKET_TIMEOUT - waited));
+        if (r < 0) {
+            break;
+        }
+        if (r > 0) {
+            got += (size_t)r;
+            gap_start = z_clock_now();
+        }
     }
     return got;
 }
