@@ -382,8 +382,13 @@ static z_result_t _z_transport_tx_send_n_msg(_z_transport_common_t *ztc, const _
         ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);
     }
     if (ret != _Z_RES_OK) {
+        // Only DROP reaches here: BLOCK waits for the lock. Dropping under DROP
+        // is the requested behaviour, not a failure, so report success, as
+        // zenoh's DROP does. The try-lock's error is the port's own code (-1,
+        // _Z_ERR_GENERIC or an errno mapping), so a caller could not tell it
+        // from a real send failure anyway (nano-ros issue 2005).
         _Z_INFO("Dropping zenoh message because of congestion control");
-        return ret;
+        return _Z_RES_OK;
     }
     // Process message
     ret = _z_transport_tx_send_n_msg_inner(ztc, n_msg, reliability, peers);
