@@ -231,8 +231,9 @@ z_result_t _z_raweth_send_n_msg(_z_session_t *zn, const _z_network_message_t *n_
     // Acquire the lock and drop the message if needed
     ret = _z_transport_tx_mutex_lock(&ztm->_common, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);
     if (ret != _Z_RES_OK) {
+        // A DROP that dropped is not a failure; see _z_transport_tx_send_n_msg.
         _Z_INFO("Dropping zenoh message because of congestion control");
-        return ret;
+        return _Z_RES_OK;
     }
     const _z_keyexpr_t *keyexpr = NULL;
     switch (n_msg->_tag) {
