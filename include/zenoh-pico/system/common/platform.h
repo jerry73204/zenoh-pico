@@ -27,7 +27,8 @@
 
 /* Centralized built-in socket markers for TCP/UDP/WS/TLS transports that use
  * the platform socket layer. */
-#if !defined(ZP_PLATFORM_SOCKET_POSIX) && (defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD))
+#if !defined(ZP_PLATFORM_SOCKET_POSIX) && \
+    (defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_NUTTX))
 #define ZP_PLATFORM_SOCKET_POSIX 1
 #endif
 
@@ -67,7 +68,7 @@
 
 #ifdef ZP_SYSTEM_PLATFORM_HEADER
 #include ZP_SYSTEM_PLATFORM_HEADER
-#elif defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD)
+#elif defined(ZENOH_LINUX) || defined(ZENOH_MACOS) || defined(ZENOH_BSD) || defined(ZENOH_NUTTX)
 #include "zenoh-pico/system/platform/unix.h"
 #elif defined(ZENOH_WINDOWS)
 #define NOMINMAX

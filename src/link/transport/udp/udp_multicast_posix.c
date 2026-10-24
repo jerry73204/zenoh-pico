@@ -307,7 +307,7 @@ void _z_close_udp_multicast(_z_sys_net_socket_t *sockrecv, _z_sys_net_socket_t *
             /* Do nothing. */
         }
     }
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_LINUX) || defined(ZENOH_NUTTX)
     if (lep._iptcp != NULL) {
         z_free(lep._iptcp->ai_addr);
     }

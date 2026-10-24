@@ -292,7 +292,7 @@ static size_t _z_tcp_posix_read_exact(_z_sys_net_socket_t sock, uint8_t *ptr, si
 }
 
 static size_t _z_tcp_posix_write(_z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
-#if defined(ZENOH_LINUX)
+#if defined(ZENOH_LINUX) || defined(ZENOH_NUTTX)
     return (size_t)send(sock._fd, ptr, len, MSG_NOSIGNAL);
 #else
     return (size_t)send(sock._fd, ptr, len, 0);
