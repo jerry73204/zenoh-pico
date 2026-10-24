@@ -50,6 +50,14 @@ static speed_t _z_posix_tty_baudrate_to_speed(uint32_t baudrate) {
         case 230400:
             return B230400;
 #endif
+#ifdef B460800
+        case 460800:
+            return B460800;
+#endif
+#ifdef B921600
+        case 921600:
+            return B921600;
+#endif
         default:
             return (speed_t)0;
     }
