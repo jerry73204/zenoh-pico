@@ -60,6 +60,15 @@
 #define ZP_PLATFORM_SOCKET_OPENCR 1
 #endif
 
+/* A platform whose serial backend frames for itself (COBS, length, CRC, as
+ * src/link/transport/upper/serial_protocol.c does) defines this and provides
+ * `_z_read_serial_internal` / `_z_send_serial_internal`; the protocol layer
+ * then uses those instead of its byte-at-a-time framing over `_z_serial_read`
+ * and `_z_serial_write`. The wire format is the same either way. */
+#if !defined(ZP_PLATFORM_SERIAL_FRAMING) && defined(ZENOH_ZEPHYR)
+#define ZP_PLATFORM_SERIAL_FRAMING 1
+#endif
+
 #if !defined(ZP_PLATFORM_SOCKET_LINKS_ENABLED) &&                                    \
     (Z_FEATURE_LINK_TCP == 1 || Z_FEATURE_LINK_TLS == 1 || Z_FEATURE_LINK_WS == 1 || \
      Z_FEATURE_LINK_UDP_MULTICAST == 1 || Z_FEATURE_LINK_UDP_UNICAST == 1)

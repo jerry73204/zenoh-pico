@@ -33,6 +33,15 @@ void _z_serial_close(_z_sys_net_socket_t *sock);
 size_t _z_serial_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t len);
 size_t _z_serial_write(_z_sys_net_socket_t sock, const uint8_t *ptr, size_t len);
 
+#if defined(ZP_PLATFORM_SERIAL_FRAMING)
+/* Provided by a platform that frames for itself (see ZP_PLATFORM_SERIAL_FRAMING
+ * in system/common/platform.h). One call moves one whole frame: `header` is the
+ * serial protocol's flag byte, and the return is the payload length, or
+ * SIZE_MAX on error. */
+size_t _z_read_serial_internal(const _z_sys_net_socket_t sock, uint8_t *header, uint8_t *ptr, size_t len);
+size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t header, const uint8_t *ptr, size_t len);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

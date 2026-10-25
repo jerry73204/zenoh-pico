@@ -130,6 +130,7 @@ static z_result_t _z_serial_endpoint_parse(_z_serial_endpoint_cfg_t *cfg, const 
     return _Z_RES_OK;
 }
 
+#if !defined(ZP_PLATFORM_SERIAL_FRAMING)
 static size_t _z_serial_write_all(_z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
     size_t total = 0;
     while (total != len) {
@@ -199,6 +200,7 @@ static size_t _z_send_serial_internal(const _z_sys_net_socket_t sock, uint8_t he
     z_free(tmp_buf);
     return (written == raw_len) ? len : SIZE_MAX;
 }
+#endif /* !defined(ZP_PLATFORM_SERIAL_FRAMING) */
 
 z_result_t _z_serial_endpoint_valid(const _z_endpoint_t *endpoint) {
     _z_serial_endpoint_cfg_t cfg;
