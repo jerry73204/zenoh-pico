@@ -24,9 +24,9 @@
 // suites actually cover, which is worth knowing before an island depends on
 // services over this link.
 
-#include "zenoh-pico/config.h"
+#include "zenoh-pico/link/transport/isotp.h"
 
-#if Z_FEATURE_LINK_ISOTP == 1
+#if defined(ZENOH_ZEPHYR) && Z_FEATURE_LINK_ISOTP == 1
 
 #include <string.h>
 #include <zephyr/canbus/isotp.h>
@@ -34,7 +34,6 @@
 #include <zephyr/drivers/can.h>
 #include <zephyr/kernel.h>
 
-#include "zenoh-pico/system/link/isotp.h"
 #include "zenoh-pico/utils/logging.h"
 
 // Zephyr's contexts are large (each carries a buffer queue and a work item) and
@@ -271,4 +270,4 @@ size_t _z_send_isotp(const _z_isotp_socket_t *sock, const uint8_t *ptr, size_t l
     return len;
 }
 
-#endif  // Z_FEATURE_LINK_ISOTP == 1
+#endif  // defined(ZENOH_ZEPHYR) && Z_FEATURE_LINK_ISOTP == 1

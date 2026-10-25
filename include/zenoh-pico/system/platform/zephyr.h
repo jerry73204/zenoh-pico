@@ -67,7 +67,7 @@ typedef struct {
     };
 #if Z_FEATURE_LINK_ISOTP == 1
     // Zephyr's ISO-TP contexts are large and must outlive every call, so they
-    // live in a pool in src/system/zephyr/isotp.c and this is the index into
+    // live in a pool in src/link/transport/isotp/isotp_zephyr.c and this is the index into
     // it. -1 means "no slot", which is what a closed link holds.
     int _isotp_slot;
 #endif

@@ -6,7 +6,8 @@ set(ZP_PLATFORM_SOURCE_FILES
     "${PROJECT_SOURCE_DIR}/src/link/transport/tcp/tcp_zephyr.c"
     "${PROJECT_SOURCE_DIR}/src/link/transport/udp/udp_zephyr.c"
     "${PROJECT_SOURCE_DIR}/src/link/transport/serial/uart_zephyr.c"
-    "${PROJECT_SOURCE_DIR}/src/link/transport/can/can_zephyr.c")
+    "${PROJECT_SOURCE_DIR}/src/link/transport/can/can_zephyr.c"
+    "${PROJECT_SOURCE_DIR}/src/link/transport/isotp/isotp_zephyr.c")
 if(ZP_UDP_MULTICAST_ENABLED)
   list(APPEND ZP_PLATFORM_SOURCE_FILES
        "${PROJECT_SOURCE_DIR}/src/link/transport/udp/udp_multicast_zephyr.c")
