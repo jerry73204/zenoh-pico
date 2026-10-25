@@ -15,15 +15,8 @@
 
 #if defined(ZENOH_ZEPHYR)
 
-#include <fcntl.h>
-#include <netdb.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <zephyr/net/net_if.h>
-#include <zephyr/net/socket.h>
-#include <zephyr/posix/sys/select.h>
 
 #include "zenoh-pico/collections/string.h"
 #include "zenoh-pico/config.h"
@@ -31,6 +24,19 @@
 #include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/utils/logging.h"
 #include "zenoh-pico/utils/pointers.h"
+
+/* A serial-only image (CONFIG_NETWORKING=n) has no IP stack: no sockets, no
+ * `_fd` in `_z_sys_net_socket_t`, none of the headers below. The transport
+ * layer still references these three helpers, so such a build gets stubs that
+ * fail -- nothing can reach them without a socket to act on. */
+#if Z_HAS_SOCKET_LINK
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <zephyr/net/net_if.h>
+#include <zephyr/net/socket.h>
+#include <zephyr/posix/sys/select.h>
 
 z_result_t _z_socket_set_blocking(const _z_sys_net_socket_t *sock, bool blocking) {
     int flags = fcntl(sock->_fd, F_GETFL, 0);
@@ -94,6 +100,22 @@ z_result_t _z_socket_wait_readable(_z_socket_wait_iter_t *iter, uint32_t timeout
 
     return has_data ? _Z_RES_OK : _Z_NO_DATA_PROCESSED;
 }
+
+#else  // !Z_HAS_SOCKET_LINK
+z_result_t _z_socket_set_blocking(const _z_sys_net_socket_t *sock, bool blocking) {
+    _ZP_UNUSED(sock);
+    _ZP_UNUSED(blocking);
+    _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+}
+
+void _z_socket_close(_z_sys_net_socket_t *sock) { _ZP_UNUSED(sock); }
+
+z_result_t _z_socket_wait_readable(_z_socket_wait_iter_t *iter, uint32_t timeout_ms) {
+    _ZP_UNUSED(iter);
+    _ZP_UNUSED(timeout_ms);
+    _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+}
+#endif  // Z_HAS_SOCKET_LINK
 
 #if Z_FEATURE_LINK_BLUETOOTH == 1
 #error "Bluetooth not supported yet on Zephyr port of Zenoh-Pico"
