@@ -32,7 +32,17 @@
 #define Z_BATCH_MULTICAST_SIZE @BATCH_MULTICAST_SIZE@
 #endif
 #ifndef Z_CONFIG_SOCKET_TIMEOUT
+#ifdef ZENOH_NUTTX
+#define Z_CONFIG_SOCKET_TIMEOUT 5000
+#else
+/* Zephyr must NOT use a long timeout: zsock serializes send/recv on a
+ * per-fd mutex, so the blocking read task holds the socket for a full
+ * SO_RCVTIMEO window between inbound packets and every tx (declare,
+ * lease keepalive, publish, reply) stalls behind it. At 5000 ms the
+ * client keepalives miss the 10 s lease and the router drops the
+ * session. 100 ms matches the unix/freertos ports. */
 #define Z_CONFIG_SOCKET_TIMEOUT @Z_CONFIG_SOCKET_TIMEOUT@
+#endif
 #endif
 /* Guarded so an embedding build can set these with a -D. The lease is BOTH the
  * keepalive cadence (lease / EXPIRE_FACTOR) and the peer-silence tolerance,
