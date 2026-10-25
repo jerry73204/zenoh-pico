@@ -141,6 +141,9 @@ static z_result_t _z_open_inner(_z_session_rc_t *zs, _z_string_t *locator, const
     }
     _z_transport_get_common(&zn->_tp)->_session = _z_session_rc_clone_as_weak(zs);
     _z_transport_get_common(&zn->_tp)->_state = _Z_TRANSPORT_STATE_OPEN;
+    // nano-ros issue 0899 -- the transport is whole: sends may enter it. Before
+    // anything below, or a peer open's own declarations would be refused.
+    _z_atomic_bool_store(&zn->_tp_ready, true, _z_memory_order_release);
 #if Z_FEATURE_MULTICAST_DECLARATIONS == 1
     if (zn->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE) {
         ret = _z_interest_pull_resource_from_peers(zn);
@@ -509,6 +512,7 @@ z_result_t _z_open_locators(_z_session_rc_t *zn, const _z_string_svec_t *listen_
  */
 z_result_t _z_open(_z_session_rc_t *zn, _z_config_t *config, const _z_id_t *zid) {
     z_result_t ret = _Z_RES_OK;
+    _z_atomic_bool_store(&_Z_RC_IN_VAL(zn)->_tp_ready, false, _z_memory_order_release);
     _Z_RC_IN_VAL(zn)->_tp._type = _Z_TRANSPORT_NONE;
 
     _z_string_svec_t listen_locators = _z_string_svec_null();
@@ -598,7 +602,7 @@ _z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *execut
             ret = _z_send_n_msg(s, n_msg, Z_RELIABILITY_RELIABLE, Z_CONGESTION_CONTROL_BLOCK, NULL);
             if (ret != _Z_RES_OK) {
                 _Z_DEBUG("Send message during reopen failed: %i", ret);
-                _z_transport_clear(&s->_tp);
+                _z_session_transport_teardown(s);
                 _z_session_transport_mutex_unlock(s);
                 tc->_session = _z_session_rc_clone_as_weak(&zs);
                 tc->_state = _Z_TRANSPORT_STATE_RECONNECTING;

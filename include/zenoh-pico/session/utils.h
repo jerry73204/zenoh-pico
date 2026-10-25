@@ -91,6 +91,11 @@ static inline void _z_session_admin_space_mutex_lock(_z_session_t *zn) { _ZP_UNU
 static inline void _z_session_admin_space_mutex_unlock(_z_session_t *zn) { _ZP_UNUSED(zn); }
 #endif
 
+/* nano-ros issue 0899 -- the one way to tear `zn->_tp` down while sends may
+ * be running: mark it not ready, then clear it. Call with `_mutex_transport`
+ * held, so no send that saw it ready is still inside. */
+void _z_session_transport_teardown(_z_session_t *zn);
+
 #ifdef __cplusplus
 }
 #endif

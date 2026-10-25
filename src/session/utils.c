@@ -85,6 +85,7 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
     zn->_tp._type = _Z_TRANSPORT_NONE;
     // Initialize the counters to 1
     _z_atomic_size_init(&zn->_entity_id, 1);
+    _z_atomic_bool_init(&zn->_tp_ready, false);
     zn->_resource_id = 1;
     zn->_query_id = 1;
     zn->_last_timestamp = 0;
@@ -236,12 +237,17 @@ z_result_t _z_session_close(_z_session_t *zn) {
     return _Z_RES_OK;
 }
 
+void _z_session_transport_teardown(_z_session_t *zn) {
+    _z_atomic_bool_store(&zn->_tp_ready, false, _z_memory_order_release);
+    _z_transport_clear(&zn->_tp);
+}
+
 void _z_session_clear(_z_session_t *zn) {
     _z_session_close(zn);
     _z_runtime_clear(&zn->_runtime);
     _z_config_clear(&zn->_config);
     _z_session_transport_mutex_lock(zn);
-    _z_transport_clear(&zn->_tp);
+    _z_session_transport_teardown(zn);
     _z_session_transport_mutex_unlock(zn);
 
 #if Z_FEATURE_MULTI_THREAD == 1

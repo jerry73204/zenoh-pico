@@ -659,7 +659,19 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
      * and `_z_send_t_msg` (a `_z_transport_t *`) does not: its callers are the
      * lease and read tasks, and the teardown joins the read task before it
      * frees anything. */
+    /* nano-ros issue 0899 -- an outage fails a send at once. The reconnect
+     * holds `_mutex_transport` across a blocking `_z_open` (up to
+     * Z_TRANSPORT_CONNECT_TIMEOUT, retried every second), so a send that took
+     * the lock first would wait out the whole outage. Checked again under the
+     * lock: a teardown may have run while this one waited for it. */
+    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
+        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
     _z_session_transport_mutex_lock(zn);
+    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
+        _z_session_transport_mutex_unlock(zn);
+        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
     // Call transport function
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE: {
@@ -719,7 +731,19 @@ z_result_t _z_send_n_batch(_z_session_t *zn, z_congestion_control_t cong_ctrl) {
      * and `_z_send_t_msg` (a `_z_transport_t *`) does not: its callers are the
      * lease and read tasks, and the teardown joins the read task before it
      * frees anything. */
+    /* nano-ros issue 0899 -- an outage fails a send at once. The reconnect
+     * holds `_mutex_transport` across a blocking `_z_open` (up to
+     * Z_TRANSPORT_CONNECT_TIMEOUT, retried every second), so a send that took
+     * the lock first would wait out the whole outage. Checked again under the
+     * lock: a teardown may have run while this one waited for it. */
+    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
+        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
     _z_session_transport_mutex_lock(zn);
+    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
+        _z_session_transport_mutex_unlock(zn);
+        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
     // Call transport function
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE:

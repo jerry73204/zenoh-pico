@@ -130,6 +130,12 @@ typedef struct _z_session_t {
     // Zenoh-pico is considering a single transport per session.
     z_whatami_t _mode;
     _z_transport_t _tp;
+    /* nano-ros issue 0899 -- `_tp` is open and a send may enter it. Cleared
+     * before a teardown frees the transport, set when `_z_open` succeeds. A
+     * send reads it before taking `_mutex_transport`, so during an outage it
+     * fails at once instead of waiting for the reconnect, which holds that
+     * mutex across a blocking `_z_open`. */
+    _z_atomic_bool_t _tp_ready;
 
     // Zenoh PID
     _z_id_t _local_zid;

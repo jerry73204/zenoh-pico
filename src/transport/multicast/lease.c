@@ -56,7 +56,7 @@ _z_fut_fn_result_t _zp_multicast_failed_result(_z_transport_multicast_t *ztm, _z
     // Store weak session, to reuse for reconnection
     _z_session_weak_t zs = _z_session_weak_clone(&ztm->_common._session);
 #endif
-    _z_transport_clear(&session->_tp);
+    _z_session_transport_teardown(session);
     _z_session_transport_mutex_unlock(session);
 
 #if Z_FEATURE_AUTO_RECONNECT == 1
