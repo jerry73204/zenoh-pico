@@ -77,12 +77,12 @@ typedef struct {
 /**
  * Open a CAN link.
  *
- * `dbitrate` of 0 selects classic CAN; any other value selects CAN FD with
- * that data-phase rate. On platforms whose interface is preconfigured (a
- * Linux `ip link set`, or a Zephyr devicetree `bitrate` property) the rate
- * arguments may be advisory -- the call must still succeed rather than fail
- * on a rate it cannot apply, and must report the mode it actually got in
- * `sock->_fd_mode`.
+ * The controller is configured and started before the link opens -- a Linux
+ * `ip link set`, or on Zephyr devicetree's `bus-speed` and the board's
+ * `can_start()` (nano-ros RFC-0109 D10). `bitrate` and `dbitrate` are
+ * therefore advisory everywhere and the Linux and Zephyr ports ignore them:
+ * CAN FD versus classic is read from the started interface, and the mode the
+ * link got is reported in `sock->_fd_mode`.
  */
 z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
                        uint32_t match, uint32_t mask);
