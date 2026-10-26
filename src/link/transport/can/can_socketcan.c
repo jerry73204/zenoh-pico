@@ -34,11 +34,11 @@
 // RFC-0080 / phase-377. Linux SocketCAN. This is also the binding that talks
 // to a virtual `vcan0`, which is what makes the link testable with no hardware.
 
-static z_result_t __z_can_bind(_z_can_socket_t *sock, const char *dev, uint32_t dbitrate, uint32_t id, uint32_t match,
-                               uint32_t mask) {
+static z_result_t __z_can_bind(_z_can_socket_t *sock, const char *dev, uint32_t id, uint32_t match, uint32_t mask) {
     // Bit rates are set out of band on Linux (`ip link set can0 type can
-    // bitrate ...`), and a virtual interface has none at all. Honour the
-    // contract in link/transport/can.h: do not fail on a rate we cannot apply.
+    // bitrate ...`), and a virtual interface has none at all, so the locator's
+    // rates are not applied (link/transport/can.h). Whether the interface is CAN
+    // FD is out of band too, and is read below.
     int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (fd < 0) {
         _Z_ERROR("CAN: socket(PF_CAN) failed: %d", errno);
@@ -53,6 +53,9 @@ static z_result_t __z_can_bind(_z_can_socket_t *sock, const char *dev, uint32_t 
         close(fd);
         return _Z_ERR_GENERIC;
     }
+    // Taken now: `ifr_ifindex` and `ifr_mtu` share the ifreq union, so the
+    // SIOCGIFMTU below overwrites it.
+    int ifindex = ifr.ifr_ifindex;
 
     // Admit the whole band this bus segment uses for zenoh; the read then drops
     // our own frames. A mask of 0 matches everything, which is the default for
@@ -66,23 +69,26 @@ static z_result_t __z_can_bind(_z_can_socket_t *sock, const char *dev, uint32_t 
         return _Z_ERR_GENERIC;
     }
 
-    // Ask for CAN FD. If the interface does not support it we fall back to
-    // classic framing rather than failing, and report the mode we got so the
-    // link can size its MTU from reality.
+    // CAN FD when the INTERFACE is: its MTU is CANFD_MTU once it was brought
+    // up with `fd on` (a vcan: `ip link set vcan0 mtu 72`), CAN_MTU otherwise.
+    // That used to be chosen by the locator's `dbitrate`, which asked for FD
+    // frames on an interface that may not carry them -- a send then fails with
+    // EINVAL rather than at open (nano-ros RFC-0109 D10). Report the mode we
+    // got so the link sizes its MTU from reality.
     _Bool fd_mode = false;
-    if (dbitrate != 0u) {
+    if ((ioctl(fd, SIOCGIFMTU, &ifr) == 0) && (ifr.ifr_mtu == (int)CANFD_MTU)) {
         int enable = 1;
         if (setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable, sizeof(enable)) == 0) {
             fd_mode = true;
         } else {
-            _Z_DEBUG("CAN: interface '%s' has no CAN FD, using classic frames", dev);
+            _Z_DEBUG("CAN: interface '%s' has a CAN FD MTU but refused FD frames, using classic", dev);
         }
     }
 
     struct sockaddr_can addr;
     memset(&addr, 0, sizeof(addr));
     addr.can_family = AF_CAN;
-    addr.can_ifindex = ifr.ifr_ifindex;
+    addr.can_ifindex = ifindex;
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         _Z_ERROR("CAN: bind('%s') failed: %d", dev, errno);
         close(fd);
@@ -101,14 +107,16 @@ static z_result_t __z_can_bind(_z_can_socket_t *sock, const char *dev, uint32_t 
 z_result_t _z_open_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
                        uint32_t match, uint32_t mask) {
     _ZP_UNUSED(bitrate);
-    return __z_can_bind(sock, dev, dbitrate, id, match, mask);
+    _ZP_UNUSED(dbitrate);
+    return __z_can_bind(sock, dev, id, match, mask);
 }
 
 z_result_t _z_listen_can(_z_can_socket_t *sock, const char *dev, uint32_t bitrate, uint32_t dbitrate, uint32_t id,
                          uint32_t match, uint32_t mask) {
     _ZP_UNUSED(bitrate);
+    _ZP_UNUSED(dbitrate);
     // Multicast peers all listen; a bus has no connection setup.
-    return __z_can_bind(sock, dev, dbitrate, id, match, mask);
+    return __z_can_bind(sock, dev, id, match, mask);
 }
 
 void _z_close_can(_z_can_socket_t *sock) {

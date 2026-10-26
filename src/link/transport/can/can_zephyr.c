@@ -22,17 +22,19 @@
 #include <zephyr/drivers/can.h>
 #include <zephyr/kernel.h>
 
+#include "zenoh-pico/link/transport/can_zephyr.h"
 #include "zenoh-pico/utils/logging.h"
 
 /*------------------ CAN sockets ------------------*/
 // RFC-0080 / phase-377. Zephyr CAN controller driver.
 
-// Per-link receive queues, and per-device start refcounts.
+// Per-link receive queues.
 //
-// Both are pools rather than single globals because several zenoh sessions can
-// share one CAN controller. A shared queue would let one link dequeue and drop
-// a frame belonging to another; a shared start/stop would let one link's close
-// stop the controller under the others.
+// A pool rather than a single global because several zenoh sessions can share
+// one CAN controller, and a shared queue would let one link dequeue and drop a
+// frame belonging to another. The controller itself is not the link's: it is
+// started, and its rates and mode chosen, before any session opens
+// (`can_zephyr.h`).
 #ifndef Z_CAN_RX_QUEUE_DEPTH
 #define Z_CAN_RX_QUEUE_DEPTH 16
 #endif
@@ -46,13 +48,7 @@ static struct k_msgq _z_can_msgq_pool[Z_CAN_MAX_LINKS];
 static char _z_can_msgq_buf[Z_CAN_MAX_LINKS][Z_CAN_RX_QUEUE_DEPTH * sizeof(struct can_frame)];
 static bool _z_can_msgq_taken[Z_CAN_MAX_LINKS];
 
-// Devices this image has started, with a refcount each.
-static const struct device *_z_can_started_dev[Z_CAN_MAX_LINKS];
-static uint8_t _z_can_started_ref[Z_CAN_MAX_LINKS];
-
-// One mutex guards both tables. Open and close are rare and off the data path,
-// so a single lock costs nothing and avoids a torn refcount when two sessions
-// come up concurrently.
+// Guards the queue pool. Open and close are rare and off the data path.
 K_MUTEX_DEFINE(_z_can_pool_mutex);
 
 static struct k_msgq *__z_can_msgq_take(void) {
@@ -88,68 +84,6 @@ static void __z_can_msgq_give(struct k_msgq *q) {
     k_mutex_unlock(&_z_can_pool_mutex);
 }
 
-// Start the controller on the first link to claim it; later links just take a
-// reference. Returns false if it could not be started.
-static bool __z_can_dev_acquire(const struct device *dev) {
-    bool ok = true;
-    k_mutex_lock(&_z_can_pool_mutex, K_FOREVER);
-    for (size_t i = 0; i < Z_CAN_MAX_LINKS; i++) {
-        if (_z_can_started_dev[i] == dev) {
-            _z_can_started_ref[i]++;
-            k_mutex_unlock(&_z_can_pool_mutex);
-            return true;  // already running, do not restart it under the others
-        }
-    }
-    for (size_t i = 0; i < Z_CAN_MAX_LINKS; i++) {
-        if (_z_can_started_dev[i] == NULL) {
-            if (can_start(dev) < 0) {
-                ok = false;
-            } else {
-                _z_can_started_dev[i] = dev;
-                _z_can_started_ref[i] = 1;
-            }
-            k_mutex_unlock(&_z_can_pool_mutex);
-            return ok;
-        }
-    }
-    k_mutex_unlock(&_z_can_pool_mutex);
-    _Z_ERROR("CAN: no free device slot (Z_CAN_MAX_LINKS=%d)", (int)Z_CAN_MAX_LINKS);
-    return false;
-}
-
-// Stop only when the last link on this device goes away.
-static void __z_can_dev_release(const struct device *dev) {
-    k_mutex_lock(&_z_can_pool_mutex, K_FOREVER);
-    for (size_t i = 0; i < Z_CAN_MAX_LINKS; i++) {
-        if (_z_can_started_dev[i] == dev) {
-            if (_z_can_started_ref[i] > 0) {
-                _z_can_started_ref[i]--;
-            }
-            if (_z_can_started_ref[i] == 0) {
-                (void)can_stop(dev);
-                _z_can_started_dev[i] = NULL;
-            }
-            break;
-        }
-    }
-    k_mutex_unlock(&_z_can_pool_mutex);
-}
-
-// True when some link has already started this controller, in which case its
-// mode and bit rates must not be touched.
-static bool __z_can_dev_in_use(const struct device *dev) {
-    bool in_use = false;
-    k_mutex_lock(&_z_can_pool_mutex, K_FOREVER);
-    for (size_t i = 0; i < Z_CAN_MAX_LINKS; i++) {
-        if ((_z_can_started_dev[i] == dev) && (_z_can_started_ref[i] > 0)) {
-            in_use = true;
-            break;
-        }
-    }
-    k_mutex_unlock(&_z_can_pool_mutex);
-    return in_use;
-}
-
 static z_result_t __z_can_setup(_z_can_socket_t *sock, const char *dev_name, uint32_t bitrate, uint32_t dbitrate,
                                 uint32_t id, uint32_t match, uint32_t mask) {
     const struct device *dev = device_get_binding(dev_name);
@@ -162,57 +96,23 @@ static z_result_t __z_can_setup(_z_can_socket_t *sock, const char *dev_name, uin
         return _Z_ERR_GENERIC;
     }
 
-    bool shared = __z_can_dev_in_use(dev);
-    _Bool fd_mode = false;
-
-    if (shared) {
-        // Another link already configured and started this controller. Read the
-        // mode back rather than reconfiguring, which would disrupt it.
-#ifdef CONFIG_CAN_FD_MODE
-        can_mode_t mode = 0;
-        if (can_get_capabilities(dev, &mode) == 0) {
-            fd_mode = ((mode & CAN_MODE_FD) != 0);
-        }
-#endif
-        _Z_DEBUG("CAN: '%s' already in use, inheriting its configuration", dev_name);
-    } else {
-        // A controller already started cannot be reconfigured; stopping first is
-        // harmless if it was never started.
-        (void)can_stop(dev);
-
-        // CONFIG_CAN_FD_MODE gates more than performance: without it
-        // `z_impl_can_set_bitrate_data` is not compiled at all, and
-        // `struct can_frame.data` is 8 bytes rather than 64. Everything FD has
-        // to be behind this, not behind a runtime flag.
-#ifdef CONFIG_CAN_FD_MODE
-        if (dbitrate != 0u) {
-            can_mode_t caps = 0;
-            if ((can_get_capabilities(dev, &caps) == 0) && ((caps & CAN_MODE_FD) != 0)) {
-                if (can_set_mode(dev, CAN_MODE_FD) == 0) {
-                    fd_mode = true;
-                }
-            }
-            if (!fd_mode) {
-                _Z_DEBUG("CAN: '%s' has no CAN FD, using classic frames", dev_name);
-            }
-        }
-#else
-        if (dbitrate != 0u) {
-            _Z_DEBUG("CAN: built without CONFIG_CAN_FD_MODE, using classic frames");
-        }
-#endif
-
-        // Bit rates may be fixed by devicetree. Honour the contract in
-        // link/transport/can.h: a rate we cannot apply is not a failure.
-        if (bitrate != 0u) {
-            (void)can_set_bitrate(dev, bitrate);
-        }
-#ifdef CONFIG_CAN_FD_MODE
-        if (fd_mode && (dbitrate != 0u)) {
-            (void)can_set_bitrate_data(dev, dbitrate);
-        }
-#endif
+    if (!_z_zephyr_can_is_started(dev, "CAN", dev_name)) {
+        return _Z_ERR_GENERIC;
     }
+
+    // RFC-0109 D10 -- the rates are the controller's, set before it was
+    // started (devicetree `bus-speed`, or whoever started it), so the locator's
+    // `bitrate` / `dbitrate` are not applied here, as on Linux. CAN FD versus
+    // classic is read from the started controller rather than chosen.
+    _ZP_UNUSED(bitrate);
+    _ZP_UNUSED(dbitrate);
+    _Bool fd_mode = false;
+    // CONFIG_CAN_FD_MODE gates more than performance: without it
+    // `struct can_frame.data` is 8 bytes rather than 64, so FD frames cannot be
+    // built at all and the mode bit is not worth reading.
+#ifdef CONFIG_CAN_FD_MODE
+    fd_mode = ((can_get_mode(dev) & CAN_MODE_FD) != 0);
+#endif
 
     struct k_msgq *rx = __z_can_msgq_take();
     if (rx == NULL) {
@@ -229,13 +129,6 @@ static z_result_t __z_can_setup(_z_can_socket_t *sock, const char *dev_name, uin
     int filter_id = can_add_rx_filter_msgq(dev, rx, &filter);
     if (filter_id < 0) {
         _Z_ERROR("CAN: could not add rx filter (match 0x%x mask 0x%x)", (unsigned)match, (unsigned)mask);
-        __z_can_msgq_give(rx);
-        return _Z_ERR_GENERIC;
-    }
-
-    if (!__z_can_dev_acquire(dev)) {
-        _Z_ERROR("CAN: could not start '%s'", dev_name);
-        can_remove_rx_filter(dev, filter_id);
         __z_can_msgq_give(rx);
         return _Z_ERR_GENERIC;
     }
@@ -275,8 +168,6 @@ void _z_close_can(_z_can_socket_t *sock) {
     }
     __z_can_msgq_give(sock->_sock._can_rx_msgq);
     sock->_sock._can_rx_msgq = NULL;
-    // Stops the controller only if this was the last link using it.
-    __z_can_dev_release(dev);
     sock->_sock._can_dev = NULL;
 }
 

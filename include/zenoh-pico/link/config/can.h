@@ -31,8 +31,10 @@ extern "C" {
 //
 //   device   the CAN interface name ("can0", "vcan0", or on Zephyr the
 //            devicetree node label)
-//   bitrate  arbitration-phase bit rate; also the sole rate for classic CAN
-//   dbitrate CAN FD data-phase bit rate. 0 selects classic CAN (8-byte frames)
+//   bitrate  arbitration-phase bit rate. ADVISORY: the Linux and Zephyr ports
+//            use the rate the started interface has (link/transport/can.h)
+//   dbitrate CAN FD data-phase bit rate. Advisory likewise; FD versus classic
+//            is read from the interface
 //   id       THIS peer's identifier. It transmits on this, and every other
 //            peer sees it as this peer's address.
 //   match    accept frames whose (id & mask) == match
