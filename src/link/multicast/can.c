@@ -118,6 +118,25 @@ static z_result_t __z_can_open(_z_link_t *self) {
         return ret;
     }
 
+    // CAN FD only. A multicast session opens by sending a JOIN, a transport
+    // message zenoh never fragments: it must fit one batch, and on this link a
+    // batch is one frame. A classic frame leaves 7 bytes after the length
+    // prefix, and the smallest JOIN is 13 (header, version, flags, a 1-byte ZID,
+    // lease, two sequence numbers up to 4 bytes each) -- 31 with the 16-byte ZID
+    // zenoh-pico generates. So a classic interface can never open a session.
+    // Say so here rather than let the JOIN encode fail into a generic open
+    // error. zenoh-rs's CAN link refuses a classic interface the same way. On
+    // classic-only hardware, use the ISO-TP link (`isotp/`), which segments a
+    // PDU of up to 4095 bytes over 8-byte frames.
+    if (!self->_socket._can._fd_mode) {
+        _Z_ERROR(
+            "CAN: '%s' is a classic (8-byte) CAN interface. The multicast CAN link is CAN FD only: a 7-byte "
+            "frame cannot carry zenoh's JOIN. Enable FD on the interface, or use the ISO-TP link (isotp/%s#...).",
+            dev, dev);
+        _z_close_can(&self->_socket._can);
+        return _Z_ERR_TRANSPORT_OPEN_FAILED;
+    }
+
     // The platform reports the mode it actually obtained; a preconfigured
     // interface may not be in the mode the endpoint asked for. Track the MTU
     // from what we got, not from what we requested -- declaring 63 on a
