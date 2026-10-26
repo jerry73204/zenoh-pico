@@ -579,6 +579,87 @@ static void test_suspend_stop_restart_resume(void) {
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
+// ─── Caller-driven spinning (_z_background_executor_spin_once) ──────────────
+
+// A deferred executor whose thread is never started runs its futures on the calling thread.
+static void test_caller_spin_runs_task(void) {
+    printf("Test: spin_once runs a task on the calling thread when no thread is started\n");
+    _z_background_executor_t be;
+    assert(_z_background_executor_init_deferred(&be) == _Z_RES_OK);
+
+    test_arg_t arg;
+    test_arg_init(&arg);
+    _z_fut_t fut = _z_fut_new(&arg, fn_finish, destroy_fn);
+    assert(_z_background_executor_spawn(&be, &fut, NULL) == _Z_RES_OK);
+    assert(test_arg_get_calls(&arg) == 0);
+
+    // One step runs the only task; nothing else is ready afterwards.
+    assert(_z_background_executor_spin_once(&be) == false);
+    assert(test_arg_get_calls(&arg) == 1);
+    assert(test_arg_get_destroyed(&arg) == true);
+    // A spin with an empty queue does nothing.
+    assert(_z_background_executor_spin_once(&be) == false);
+
+    _z_background_executor_destroy(&be);
+    test_arg_clear(&arg);
+}
+
+typedef struct {
+    _z_background_executor_t *be;
+    test_arg_t *child;
+    z_result_t spawn_result;
+} spawner_arg_t;
+
+// Spawns `child` onto the same executor from inside a running task.
+static _z_fut_fn_result_t fn_spawn_child(void *arg, _z_executor_t *ex) {
+    (void)ex;
+    spawner_arg_t *sa = (spawner_arg_t *)arg;
+    _z_fut_t fut = _z_fut_new(sa->child, fn_finish, destroy_fn);
+    sa->spawn_result = _z_background_executor_spawn(sa->be, &fut, NULL);
+    return (_z_fut_fn_result_t){._status = _Z_FUT_STATUS_READY};
+}
+
+// A task run by spin_once that spawns another task must not try to take the executor lock again (it is not
+// recursive): the spawn is recognised as coming from the executor, and the child runs on a later spin.
+static void test_caller_spin_nested_spawn(void) {
+    printf("Test: a task run by spin_once can spawn onto the same executor\n");
+    _z_background_executor_t be;
+    assert(_z_background_executor_init_deferred(&be) == _Z_RES_OK);
+
+    test_arg_t child;
+    test_arg_init(&child);
+    spawner_arg_t sa = {.be = &be, .child = &child, .spawn_result = _Z_ERR_GENERIC};
+    _z_fut_t fut = _z_fut_new(&sa, fn_spawn_child, NULL);
+    assert(_z_background_executor_spawn(&be, &fut, NULL) == _Z_RES_OK);
+
+    assert(_z_background_executor_spin_once(&be) == true);  // the child is now ready
+    assert(sa.spawn_result == _Z_RES_OK);
+    assert(test_arg_get_calls(&child) == 0);
+    assert(_z_background_executor_spin_once(&be) == false);
+    assert(test_arg_get_calls(&child) == 1);
+
+    _z_background_executor_destroy(&be);
+    test_arg_clear(&child);
+}
+
+// While the background thread runs, spin_once does nothing, so the two modes never drive one executor at once.
+static void test_caller_spin_noop_when_started(void) {
+    printf("Test: spin_once is a no-op while the background thread runs\n");
+    _z_background_executor_t be;
+    assert(_z_background_executor_init(&be, NULL) == _Z_RES_OK);
+    assert(_z_background_executor_spin_once(&be) == false);
+
+    test_arg_t arg;
+    test_arg_init(&arg);
+    _z_fut_t fut = _z_fut_new(&arg, fn_finish, destroy_fn);
+    assert(_z_background_executor_spawn(&be, &fut, NULL) == _Z_RES_OK);
+    test_arg_wait_calls(&arg, 1);  // the thread ran it
+    assert(_z_background_executor_spin_once(&be) == false);
+
+    _z_background_executor_destroy(&be);
+    test_arg_clear(&arg);
+}
+
 int main(void) {
     test_new_destroy_no_tasks();
     test_spawn_runs_task();
@@ -596,6 +677,9 @@ int main(void) {
     test_stop_and_restart();
     test_stop_preserves_pending_tasks();
     test_suspend_stop_restart_resume();
+    test_caller_spin_runs_task();
+    test_caller_spin_nested_spawn();
+    test_caller_spin_noop_when_started();
     printf("All background executor tests passed.\n");
     return 0;
 }

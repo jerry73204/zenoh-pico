@@ -3347,11 +3347,18 @@ void zp_send_join_options_default(zp_send_join_options_t *options);
  */
 z_result_t zp_send_join(const z_loaned_session_t *zs, const zp_send_join_options_t *options);
 
+#endif
+
 /**
  * Spins zenoh executor once, executing a single pending task (such as read, lease, keep alive, accept, connect, etc...)
  * from the task queue.
  *
- * Note: only if Z_FEATURE_MULTI_THREAD is disabled.
+ * In a multi-thread build this drives the session's executor from the calling thread INSTEAD of the background
+ * executor thread, for a platform where a blocking receive on a thread of its own would stall the scheduler. It does
+ * nothing and returns ``false`` while the background executor thread is running (``zp_start_read_task`` or
+ * ``z_open`` with ``auto_start_read_task``), so the two cannot run at once. It takes the executor's lock with a
+ * try-lock: when another thread is already spinning or spawning, it returns ``false`` at once rather than wait. Futures
+ * spawned from inside a task it runs are queued on the same executor without re-taking the lock.
  *
  * Parameters:
  *   zs: Pointer to a :c:type:`z_loaned_session_t` to spin executor for.
@@ -3359,10 +3366,10 @@ z_result_t zp_send_join(const z_loaned_session_t *zs, const zp_send_join_options
  * Return:
  *   Returns ``false`` if there are no more tasks that can be executed immediately. This can only happen when
  * Z_RUNTIME_IDLE_READ_TASK_SLEEP is set to positive value; otherwise read tasks always reschedule immediately, and
- * ``true`` is always returned unless the session is closed.
+ * ``true`` is always returned unless the session is closed. In a multi-thread build it also returns ``false`` when the
+ * background executor thread is running or another thread holds the executor.
  */
 bool zp_spin_once(const z_loaned_session_t *zs);
-#endif
 
 #ifdef Z_FEATURE_UNSTABLE_API
 /**

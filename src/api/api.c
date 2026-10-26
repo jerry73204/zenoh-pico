@@ -2547,6 +2547,13 @@ z_result_t zp_stop_lease_task(z_loaned_session_t *zs) {
 bool zp_lease_task_is_running(const z_loaned_session_t *zs) {
     return _z_background_executor_is_running(&_Z_RC_IN_VAL(zs)->_runtime);
 }
+
+bool zp_spin_once(const z_loaned_session_t *zs) {
+    if (!z_session_is_closed(zs)) {
+        return _z_background_executor_spin_once((_z_runtime_t *)&_Z_RC_IN_VAL(zs)->_runtime);
+    }
+    return false;
+}
 #else
 void zp_read_options_default(zp_read_options_t *options) { options->single_read = false; }
 
