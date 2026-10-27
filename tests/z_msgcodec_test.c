@@ -1789,7 +1789,7 @@ _z_transport_message_t gen_join(void) {
         conduit._val._plain._best_effort = gen_zint();
         conduit._val._plain._reliable = gen_zint();
     }
-    return _z_t_msg_make_join(_z_whatami_from_uint8((gen_uint8() % 3)), gen_zint(), gen_zid(), conduit);
+    return _z_t_msg_make_join(_z_whatami_from_uint8((gen_uint8() % 3)), gen_zint(), gen_uint16(), gen_zid(), conduit);
 }
 void assert_eq_join(const _z_t_msg_join_t *left, const _z_t_msg_join_t *right) {
     assert(memcmp(left->_zid.id, right->_zid.id, 16) == 0);

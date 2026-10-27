@@ -134,7 +134,8 @@ z_result_t _z_multicast_open_peer(_z_transport_multicast_establish_param_t *para
     next_sn._val._plain._reliable = initial_sn_tx;
 
     _z_id_t zid = *local_zid;
-    _z_transport_message_t jsm = _z_t_msg_make_join(Z_WHATAMI_PEER, Z_TRANSPORT_LEASE, zid, next_sn);
+    _z_transport_message_t jsm =
+        _z_t_msg_make_join(Z_WHATAMI_PEER, Z_TRANSPORT_LEASE, _z_multicast_join_batch_size(zl), zid, next_sn);
 
     // Encode and send the message
     _Z_DEBUG("Sending Z_JOIN message");

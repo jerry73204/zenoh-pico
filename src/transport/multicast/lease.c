@@ -35,7 +35,8 @@ z_result_t _zp_multicast_send_join(_z_transport_multicast_t *ztm) {
     next_sn._val._plain._reliable = ztm->_common._sn_tx_reliable;
 
     _z_id_t zid = _z_transport_common_get_session(&ztm->_common)->_local_zid;
-    _z_transport_message_t jsm = _z_t_msg_make_join(Z_WHATAMI_PEER, Z_TRANSPORT_LEASE, zid, next_sn);
+    _z_transport_message_t jsm = _z_t_msg_make_join(Z_WHATAMI_PEER, Z_TRANSPORT_LEASE,
+                                                    _z_multicast_join_batch_size(ztm->_common._link), zid, next_sn);
 
     return ztm->_send_f(&ztm->_common, &jsm);
 }

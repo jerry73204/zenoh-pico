@@ -88,13 +88,18 @@ typedef enum {
  *     transport: 2 bits, see _z_link_cap_transport_t enum.
  *     flow: 1 bit, see _z_link_cap_flow_t enum.
  *     reliable: 1 bit, 1 if the link is reliable (network definition)
- *     reserved: 4 bits, reserved for future use
+ *     mtu_is_frame_ceiling: 1 bit, 1 if `_mtu` is the largest datagram the medium
+ *         can carry at all (a CAN frame), not a size this implementation chose
+ *         (UDP's 1450). Only then does the MTU bound the batch size a multicast
+ *         JOIN advertises -- see _z_multicast_join_batch_size().
+ *     reserved: 3 bits, reserved for future use
  */
 typedef struct _z_link_capabilities_t {
     uint8_t _transport : 2;
     uint8_t _flow : 1;
     uint8_t _is_reliable : 1;
-    uint8_t _reserved : 4;
+    uint8_t _mtu_is_frame_ceiling : 1;
+    uint8_t _reserved : 3;
 } _z_link_capabilities_t;
 
 struct _z_link_t;  // Forward declaration to be used in _z_f_link_*

@@ -21,6 +21,27 @@
 extern "C" {
 #endif
 
+/**
+ * The batch size this peer's JOIN advertises on `zl`, and the one it requires a
+ * peer's JOIN to state.
+ *
+ * Z_BATCH_MULTICAST_SIZE, unless the link's MTU is a hard frame ceiling
+ * (`_cap._mtu_is_frame_ceiling`, a CAN frame) smaller than it: then no batch
+ * larger than one frame can ever be sent, and advertising the constant would
+ * describe a batch the link cannot carry. zenoh-rs advertises
+ * min(batch, link MTU) and, like zenoh-pico, refuses a JOIN whose batch size is
+ * not its own -- so on CAN FD both must state 63. On every other link this is
+ * the constant, unchanged: UDP's 1450-byte MTU is a size zenoh-pico chose, and
+ * a pico built with Z_BATCH_MULTICAST_SIZE=8192 to meet zenoh-rs over UDP must
+ * keep advertising 8192.
+ */
+static inline uint16_t _z_multicast_join_batch_size(const _z_link_t *zl) {
+    if ((zl != NULL) && zl->_cap._mtu_is_frame_ceiling && (zl->_mtu < Z_BATCH_MULTICAST_SIZE)) {
+        return zl->_mtu;
+    }
+    return Z_BATCH_MULTICAST_SIZE;
+}
+
 z_result_t _z_multicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
                                          _z_transport_multicast_establish_param_t *param);
 z_result_t _z_multicast_open_peer(_z_transport_multicast_establish_param_t *param, const _z_link_t *zl,

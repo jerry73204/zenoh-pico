@@ -378,7 +378,7 @@ static z_result_t _z_multicast_handle_join_inner(_z_transport_multicast_t *ztm, 
     if (entry == NULL) {  // New peer
         // If the new node has less representing capabilities then we can't communicate
         if ((msg->_seq_num_res != Z_SN_RESOLUTION) || (msg->_req_id_res != Z_REQ_RESOLUTION) ||
-            (msg->_batch_size != Z_BATCH_MULTICAST_SIZE)) {
+            (msg->_batch_size != _z_multicast_join_batch_size(ztm->_common._link))) {
             _Z_INFO("Couldn't accept peer because distant node is incompatible config wise.");
             _Z_ERROR_RETURN(_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION);
         }
@@ -429,7 +429,7 @@ static z_result_t _z_multicast_handle_join_inner(_z_transport_multicast_t *ztm, 
 
         // Check representing capabilities
         if ((msg->_seq_num_res != Z_SN_RESOLUTION) || (msg->_req_id_res != Z_REQ_RESOLUTION) ||
-            (msg->_batch_size != Z_BATCH_MULTICAST_SIZE)) {
+            (msg->_batch_size != _z_multicast_join_batch_size(ztm->_common._link))) {
 #if Z_FEATURE_CONNECTIVITY == 1
             _z_connectivity_peer_event_data_t disconnected_peer = {0};
             uint16_t mtu = 0;

@@ -519,7 +519,7 @@ void _z_t_msg_clear(_z_transport_message_t *msg);
 z_reliability_t _z_t_msg_get_reliability(_z_transport_message_t *msg);
 
 /*------------------ Builders ------------------*/
-_z_transport_message_t _z_t_msg_make_join(z_whatami_t whatami, _z_zint_t lease, _z_id_t zid,
+_z_transport_message_t _z_t_msg_make_join(z_whatami_t whatami, _z_zint_t lease, uint16_t batch_size, _z_id_t zid,
                                           _z_conduit_sn_list_t next_sn);
 _z_transport_message_t _z_t_msg_make_init_syn(z_whatami_t whatami, _z_id_t zid);
 _z_transport_message_t _z_t_msg_make_init_ack(z_whatami_t whatami, _z_id_t zid, _z_slice_t cookie);

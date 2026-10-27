@@ -210,6 +210,11 @@ z_result_t _z_new_link_can(_z_link_t *zl, _z_endpoint_t endpoint) {
     // not end to end: controller buffers overrun and bus-off drops everything.
     // Let zenoh's own reliability cover that, as the IVC link does.
     zl->_cap._is_reliable = false;
+    // A batch can never be larger than one frame here, so the batch size this
+    // peer's JOIN advertises is the link MTU, not Z_BATCH_MULTICAST_SIZE --
+    // which is what zenoh-rs advertises too, and both reject a JOIN whose batch
+    // size differs from their own.
+    zl->_cap._mtu_is_frame_ceiling = true;
 
     // Provisional. open()/listen() replaces this with the MTU for the mode the
     // interface actually came up in.
