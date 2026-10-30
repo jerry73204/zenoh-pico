@@ -51,6 +51,11 @@ typedef struct {
     _z_id_t _remote_zid;
     z_whatami_t _remote_whatami;
     volatile bool _received;
+    // Lease bookkeeping, owned by the lease task: how long this peer has been
+    // silent across whole lease-task periods, and whether that reached ITS
+    // announced lease (see _z_transport_peer_common_lease_check).
+    _z_zint_t _silent_ms;
+    bool _expired;
     _z_resource_slist_t *_remote_resources;
 #if Z_FEATURE_CONNECTIVITY == 1
     _z_string_t _link_src;
@@ -98,6 +103,26 @@ typedef struct {
 } _z_transport_peer_multicast_t;
 
 size_t _z_transport_peer_multicast_size(const _z_transport_peer_multicast_t *src);
+
+// nano-ros issue 1731: a lease is what a node ANNOUNCES ("if you hear nothing
+// from me for this long, consider me gone"), so a peer is expired on ITS lease
+// and never on ours, as zenoh does. The lease task may wake more often than a
+// peer's lease (it serves several peers, or our lease is the shorter one), so
+// silence is summed over whole periods with nothing received: a period in which
+// `_received` stayed false was silent from end to end, so the sum never
+// overstates the real silence and a peer keeping its word is never expired.
+// Returns (and records in `_expired`) whether the peer is gone.
+static inline bool _z_transport_peer_common_lease_check(_z_transport_peer_common_t *peer, _z_zint_t peer_lease,
+                                                        _z_zint_t slept_ms) {
+    if (peer->_received) {
+        peer->_silent_ms = 0;
+        peer->_expired = false;
+    } else {
+        peer->_silent_ms += slept_ms;
+        peer->_expired = peer->_silent_ms >= peer_lease;
+    }
+    return peer->_expired;
+}
 void _z_transport_peer_multicast_clear(_z_transport_peer_multicast_t *src);
 void _z_transport_peer_multicast_copy(_z_transport_peer_multicast_t *dst, const _z_transport_peer_multicast_t *src);
 bool _z_transport_peer_multicast_eq(const _z_transport_peer_multicast_t *left,
@@ -125,6 +150,9 @@ typedef struct {
     // SN numbers
     _z_zint_t _sn_rx_reliable;
     _z_zint_t _sn_rx_best_effort;
+    // The lease this peer announced in its OPEN: how long it may stay silent
+    // before we consider it gone. Our own lease is `_common._lease`.
+    _z_zint_t _lease;
     bool _pending;
     uint8_t flow_state;
     uint16_t flow_curr_size;
@@ -246,6 +274,8 @@ typedef struct {
     // Known valid peers
     _z_transport_peer_unicast_slist_t *_peers;
     _z_pending_peers_t _pending_peers;
+    // The period the lease task last asked to sleep for (0 before its first run).
+    _z_zint_t _lease_slept_ms;
 } _z_transport_unicast_t;
 
 #define _Z_MULTICAST_ADDR_BUFF_SIZE 32  // Arbitrary size that must be able to contain any link address.
@@ -260,6 +290,8 @@ typedef struct _z_transport_multicast_t {
     _z_transport_peer_multicast_slist_t *_peers;
     // T message send function
     _zp_f_send_tmsg _send_f;
+    // The period the lease task last asked to sleep for (0 before its first run).
+    _z_zint_t _lease_slept_ms;
 } _z_transport_multicast_t;
 
 typedef enum {
@@ -284,6 +316,8 @@ typedef struct {
     uint16_t _batch_size;
     _z_zint_t _initial_sn_rx;
     _z_zint_t _initial_sn_tx;
+    // The REMOTE side's announced lease once a handshake ran (our own,
+    // Z_TRANSPORT_LEASE, when none did).
     _z_zint_t _lease;
     z_whatami_t _remote_whatami;
     uint8_t _key_id_res;

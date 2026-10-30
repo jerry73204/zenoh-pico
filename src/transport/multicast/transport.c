@@ -110,6 +110,7 @@ z_result_t _z_multicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
         ztm->_peers = _z_transport_peer_multicast_slist_new();
 
         ztm->_common._lease = Z_TRANSPORT_LEASE;
+        ztm->_lease_slept_ms = 0;
 
         // Notifiers
         ztm->_common._transmitted = false;

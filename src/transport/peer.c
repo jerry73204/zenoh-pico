@@ -79,6 +79,8 @@ void _z_transport_peer_common_copy(_z_transport_peer_common_t *dst, const _z_tra
 #endif
     dst->_remote_resources = NULL;
     dst->_received = src->_received;
+    dst->_silent_ms = src->_silent_ms;
+    dst->_expired = src->_expired;
     dst->_remote_zid = src->_remote_zid;
     dst->_remote_whatami = src->_remote_whatami;
 }
@@ -171,6 +173,7 @@ void _z_transport_peer_unicast_clear(_z_transport_peer_unicast_t *src) {
 void _z_transport_peer_unicast_copy(_z_transport_peer_unicast_t *dst, const _z_transport_peer_unicast_t *src) {
     dst->_sn_rx_reliable = src->_sn_rx_reliable;
     dst->_sn_rx_best_effort = src->_sn_rx_best_effort;
+    dst->_lease = src->_lease;
     dst->_socket = src->_socket;
     dst->_owns_socket = false;  // Ownership is not copied
     dst->_pending = false;
@@ -221,9 +224,14 @@ z_result_t _z_transport_peer_unicast_add(_z_transport_unicast_t *ztu, _z_transpo
     peer->_sn_rx_reliable = initial_sn_rx;
     peer->_sn_rx_best_effort = initial_sn_rx;
 
+    // A peer announcing no lease is held to ours rather than expired at once.
+    peer->_lease = (param->_lease != 0) ? param->_lease : Z_TRANSPORT_LEASE;
+
     peer->common._remote_zid = param->_remote_zid;
     peer->common._remote_whatami = param->_remote_whatami;
     peer->common._received = true;
+    peer->common._silent_ms = 0;
+    peer->common._expired = false;
     peer->common._remote_resources = NULL;
 #if Z_FEATURE_CONNECTIVITY == 1
     peer->common._link_src = _z_string_null();

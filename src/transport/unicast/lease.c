@@ -30,7 +30,24 @@
 static bool _zp_unicast_peer_is_expired(const _z_transport_peer_unicast_t *target,
                                         const _z_transport_peer_unicast_t *peer) {
     _ZP_UNUSED(target);
-    return !peer->common._received;
+    return peer->common._expired;
+}
+
+// The shortest lease among our own and every peer's (caller holds the peer
+// mutex). The peer-mode lease task wakes on it so no peer's lease is overshot
+// by more than one period; keep-alives to peers are paced on it too, because a
+// zenoh-pico peer older than issue 1731 still judges us on min(its, ours).
+static _z_zint_t _zp_unicast_minimum_lease(const _z_transport_unicast_t *ztu) {
+    _z_zint_t ret = ztu->_common._lease;
+    _z_transport_peer_unicast_slist_t *it = ztu->_peers;
+    while (it != NULL) {
+        const _z_transport_peer_unicast_t *peer = _z_transport_peer_unicast_slist_value(it);
+        if ((peer->_lease != 0) && (peer->_lease < ret)) {
+            ret = peer->_lease;
+        }
+        it = _z_transport_peer_unicast_slist_next(it);
+    }
+    return ret;
 }
 
 static void _zp_unicast_report_disconnected_peers(_z_transport_unicast_t *ztu,
@@ -50,7 +67,7 @@ static void _zp_unicast_report_disconnected_peers(_z_transport_unicast_t *ztu,
     _z_transport_peer_unicast_slist_t *it = *dropped_peers;
     while (it != NULL) {
         _z_transport_peer_unicast_t *peer = _z_transport_peer_unicast_slist_value(it);
-        _Z_INFO("Deleting peer because it has expired after %zums", ztu->_common._lease);
+        _Z_INFO("Deleting peer because it has expired after %zums", peer->_lease);
         _z_interest_peer_disconnected(zs, &peer->common);
 #if Z_FEATURE_CONNECTIVITY == 1
         _z_connectivity_peer_event_data_t disconnected_peer = {0};
@@ -147,13 +164,16 @@ _z_fut_fn_result_t _zp_unicast_lease_task_fn(void *ztu_arg, _z_executor_t *execu
     if (mode == Z_WHATAMI_CLIENT) {
         _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(ztu->_peers);
         assert(curr_peer != NULL);
-        if (curr_peer->common._received) {
+        // The router's silence is measured against the lease IT announced,
+        // never ours (issue 1731).
+        if (!_z_transport_peer_common_lease_check(&curr_peer->common, curr_peer->_lease, ztu->_lease_slept_ms)) {
             // Reset the lease parameters
             curr_peer->common._received = false;
-            return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_common._lease);
+            ztu->_lease_slept_ms = curr_peer->_lease;
+            return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_lease_slept_ms);
         } else {
             // THIS LOG STRING USED IN TEST, change with caution
-            _Z_INFO("Closing session because it has expired after %zums", ztu->_common._lease);
+            _Z_INFO("Closing session because it has expired after %zums", curr_peer->_lease);
             return _zp_unicast_failed_result(ztu, executor);
         }
     }
@@ -162,6 +182,12 @@ _z_fut_fn_result_t _zp_unicast_lease_task_fn(void *ztu_arg, _z_executor_t *execu
     if (mode == Z_WHATAMI_PEER) {
         _z_transport_peer_unicast_slist_t *dropped_peers = _z_transport_peer_unicast_slist_new();
         _z_transport_peer_mutex_lock(&ztu->_common);
+        // Each peer against its own lease (issue 1731).
+        for (_z_transport_peer_unicast_slist_t *it = ztu->_peers; it != NULL;
+             it = _z_transport_peer_unicast_slist_next(it)) {
+            _z_transport_peer_unicast_t *peer = _z_transport_peer_unicast_slist_value(it);
+            (void)_z_transport_peer_common_lease_check(&peer->common, peer->_lease, ztu->_lease_slept_ms);
+        }
         ztu->_peers = _z_transport_peer_unicast_slist_extract_all_filter(ztu->_peers, &dropped_peers,
                                                                          _zp_unicast_peer_is_expired, NULL);
         _z_transport_peer_unicast_slist_t *curr_list = ztu->_peers;
@@ -170,9 +196,10 @@ _z_fut_fn_result_t _zp_unicast_lease_task_fn(void *ztu_arg, _z_executor_t *execu
             curr_peer->common._received = false;
             curr_list = _z_transport_peer_unicast_slist_next(curr_list);
         }
+        ztu->_lease_slept_ms = _zp_unicast_minimum_lease(ztu);
         _z_transport_peer_mutex_unlock(&ztu->_common);
         _zp_unicast_report_disconnected_peers(ztu, &dropped_peers);
-        return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_common._lease);
+        return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_lease_slept_ms);
     }
 #endif
     return _z_fut_fn_result_ready();
@@ -197,6 +224,7 @@ _z_fut_fn_result_t _zp_unicast_keep_alive_task_fn(void *ztu_arg, _z_executor_t *
             }
         }
         ztu->_common._transmitted = false;
+        // Paced on OUR lease: the router judges us on what we announced.
         return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_common._lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR);
     }
 // TODO: Should we have a task per peer ?
@@ -216,7 +244,10 @@ _z_fut_fn_result_t _zp_unicast_keep_alive_task_fn(void *ztu_arg, _z_executor_t *
             _z_transport_peer_mutex_unlock(&ztu->_common);
         }
         ztu->_common._transmitted = false;
-        return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_common._lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR);
+        _z_transport_peer_mutex_lock(&ztu->_common);
+        _z_zint_t pace = _zp_unicast_minimum_lease(ztu);
+        _z_transport_peer_mutex_unlock(&ztu->_common);
+        return _z_fut_fn_result_wake_up_after((unsigned long)pace / Z_TRANSPORT_LEASE_EXPIRE_FACTOR);
     }
 #endif
     return _z_fut_fn_result_ready();

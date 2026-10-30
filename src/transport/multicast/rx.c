@@ -394,6 +394,8 @@ static z_result_t _z_multicast_handle_join_inner(_z_transport_multicast_t *ztm, 
         entry->common._remote_zid = msg->_zid;
         entry->common._remote_whatami = msg->_whatami;
         entry->common._received = true;
+        entry->common._silent_ms = 0;
+        entry->common._expired = false;
         entry->common._remote_resources = NULL;
 #if Z_FEATURE_CONNECTIVITY == 1
         entry->common._link_src = _z_string_null();

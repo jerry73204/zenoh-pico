@@ -102,7 +102,7 @@ static _z_zint_t _z_get_minimum_lease(_z_transport_peer_multicast_slist_t *peers
 static bool _zp_multicast_peer_is_expired(const _z_transport_peer_multicast_t *target,
                                           const _z_transport_peer_multicast_t *peer) {
     _ZP_UNUSED(target);
-    return !peer->common._received;
+    return peer->common._expired;
 }
 
 static void _zp_multicast_report_disconnected_events(_z_transport_multicast_t *ztm,
@@ -146,6 +146,13 @@ _z_fut_fn_result_t _zp_multicast_lease_task_fn(void *ztm_arg, _z_executor_t *exe
 
     _z_transport_peer_multicast_slist_t *dropped_peers = _z_transport_peer_multicast_slist_new();
     _z_transport_peer_mutex_lock(&ztm->_common);
+    // Each peer against the lease its JOIN announced, never the shortest one
+    // (issue 1731); the task wakes on the shortest, so silence is summed.
+    for (_z_transport_peer_multicast_slist_t *it = ztm->_peers; it != NULL;
+         it = _z_transport_peer_multicast_slist_next(it)) {
+        _z_transport_peer_multicast_t *peer = _z_transport_peer_multicast_slist_value(it);
+        (void)_z_transport_peer_common_lease_check(&peer->common, peer->_lease, ztm->_lease_slept_ms);
+    }
     ztm->_peers = _z_transport_peer_multicast_slist_extract_all_filter(ztm->_peers, &dropped_peers,
                                                                        _zp_multicast_peer_is_expired, NULL);
     _z_transport_peer_multicast_slist_t *curr_list = ztm->_peers;
@@ -154,10 +161,10 @@ _z_fut_fn_result_t _zp_multicast_lease_task_fn(void *ztm_arg, _z_executor_t *exe
         curr_peer->common._received = false;
         curr_list = _z_transport_peer_multicast_slist_next(curr_list);
     }
-    unsigned long min_lease = (unsigned long)_z_get_minimum_lease(ztm->_peers, ztm->_common._lease);
+    ztm->_lease_slept_ms = _z_get_minimum_lease(ztm->_peers, ztm->_common._lease);
     _z_transport_peer_mutex_unlock(&ztm->_common);
     _zp_multicast_report_disconnected_events(ztm, &dropped_peers);
-    return _z_fut_fn_result_wake_up_after(min_lease);
+    return _z_fut_fn_result_wake_up_after((unsigned long)ztm->_lease_slept_ms);
 }
 
 _z_fut_fn_result_t _zp_multicast_keep_alive_task_fn(void *ztm_arg, _z_executor_t *executor) {
