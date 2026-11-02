@@ -1034,7 +1034,12 @@ z_result_t _z_serial_open_from_dev(_z_sys_net_socket_t *sock, const char *dev, u
             _z_serial_async_quiesce(sock->_serial);
         }
 #endif
-        if (uart_configure(sock->_serial, &config) != 0) {
+        /* A driver with no runtime configuration answers -ENOSYS and keeps its
+           devicetree settings (QEMU's CMSDK APB UART, and any build with
+           CONFIG_UART_USE_RUNTIME_CONFIGURE off). That is a working link, not a
+           failed open: refusing it left such a board unable to reach any peer. */
+        const int cfg_rc = uart_configure(sock->_serial, &config);
+        if (cfg_rc != 0 && cfg_rc != -ENOSYS) {
             _Z_ERROR_LOG(_Z_ERR_GENERIC);
             ret = _Z_ERR_GENERIC;
         }
