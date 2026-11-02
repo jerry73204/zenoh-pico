@@ -103,12 +103,21 @@ typedef struct {
 } _z_zephyr_serial_stats_t;
 volatile _z_zephyr_serial_stats_t _z_zephyr_serial_stats;
 
+#if !defined(CONFIG_UART_INTERRUPT_DRIVEN)
+/* nano-ros phase-521 W6 (RFC-0113 D5) -- the polled receive path is retired. It
+ * read with `uart_poll_in` and `k_yield()`ed between attempts, so a serial
+ * session's wait was a busy loop: the reader held the CPU at its priority with
+ * nothing to do, and caught bytes only while it happened to be running
+ * (issue 0852). Every receive now waits on the ISR's ring. */
+#error "zenoh-pico's Zephyr serial link needs CONFIG_UART_INTERRUPT_DRIVEN=y (the polled receive path is retired)"
+#endif
+
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
 
 /* ── issue 0852: interrupt-driven RX ────────────────────────────────────────
  *
- * The polled path below this block reads with `uart_poll_in` and `k_yield()`s
- * between attempts. That makes byte capture a function of THREAD SCHEDULING: a
+ * The polled path this block replaced read with `uart_poll_in` and `k_yield()`ed
+ * between attempts (retired, phase-521 W6). That makes byte capture a function of THREAD SCHEDULING: a
  * byte arrives every 87 us at 115200, the hardware FIFO holds a handful, and
  * any scheduling gap longer than that loses data the driver never reports.
  *
@@ -1031,11 +1040,12 @@ z_result_t _z_serial_open_from_dev(_z_sys_net_socket_t *sock, const char *dev, u
         }
 #if defined(CONFIG_UART_INTERRUPT_DRIVEN)
         /* issue 0852 -- bind BEFORE the handshake (`_z_connect_serial`, which
-           the serial protocol layer runs once this returns), so the peer's reply is caught by the ISR rather than raced
-           for by the poll loop. A failure here is not fatal: the reader falls
-           back to polling, which is what every build did before. */
-        if (ret == _Z_RES_OK) {
-            (void)_z_serial_rx_bind(sock->_serial);
+           the serial protocol layer runs once this returns), so the peer's reply is caught by the ISR.
+           phase-521 W6 -- a failure is fatal: there is no polled reader to fall back to (a second
+           serial link, or a UART whose driver refuses an interrupt callback). */
+        if (ret == _Z_RES_OK && !_z_serial_rx_bind(sock->_serial)) {
+            _Z_ERROR("serial: %s has no interrupt-driven receive (the polled path is retired)", dev);
+            ret = _Z_ERR_GENERIC;
         }
 #endif
     } else {
@@ -1072,8 +1082,8 @@ void _z_serial_close(_z_sys_net_socket_t *sock) {
     }
 }
 
-/* Receive timeout: the link quiet this long (per byte on the polled path,
-   since the last byte the reader saw on the interrupt-driven one). Long enough
+/* Receive timeout: the link quiet this long since the last byte the reader
+   saw. Long enough
    for a peer to answer a handshake, short enough that a lost frame is
    recoverable rather than a permanent hang. */
 #ifndef _Z_ZEPHYR_SERIAL_TIMEOUT_MS
@@ -1170,27 +1180,9 @@ static size_t _z_read_serial_frame_locked(const _z_sys_net_socket_t sock, uint8_
     } else
 #endif
     {
-        for (size_t i = 0; i < _Z_SERIAL_MAX_COBS_BUF_SIZE; i++) {
-            /* Per-byte timeout. Yield rather than sleep between polls: at
-               115200 a byte is 87 us and the shortest z_sleep_ms(1) blocks a
-               whole tick, overrunning the UART. */
-            int64_t deadline = k_uptime_get() + (int64_t)_Z_ZEPHYR_SERIAL_TIMEOUT_MS;
-            int res = -1;
-            while (res != 0) {
-                res = uart_poll_in(sock._serial, &raw_buf[i]);
-                if (res != 0) {
-                    if (k_uptime_get() > deadline) {
-                        return SIZE_MAX;
-                    }
-                    k_yield();
-                }
-            }
-            _z_serial_rx_check_errors(sock, rb);
-            rb++;
-            if (raw_buf[i] == (uint8_t)0x00) {
-                break;
-            }
-        }
+        /* phase-521 W6 -- not this link's bound UART: nothing fills a ring for it,
+           and the polled reader that used to answer is retired. */
+        return SIZE_MAX;
     }
 
     size_t ret =
