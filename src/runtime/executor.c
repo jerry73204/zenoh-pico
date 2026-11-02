@@ -60,6 +60,37 @@ _z_executor_status_t _z_executor_get_status(const _z_executor_t *executor) {
     return result;
 }
 
+bool _z_executor_next_wake_ms(const _z_executor_t *executor, bool (*skip)(const _z_fut_t *fut), uint64_t *out_ms) {
+    bool found = false;
+    uint64_t soonest = 0;
+    // A ready future is due now, whatever it is: it runs on the next spin.
+    if (!_z_fut_data_hmap_index_deque_is_empty(&executor->_ready_tasks)) {
+        *out_ms = 0;
+        return true;
+    }
+    const _z_sleeping_fut_pqueue_t *sleeping = &executor->_sleeping_tasks;
+    for (size_t i = 0; i < sleeping->_size; i++) {
+        const _z_fut_data_t *data = &_z_fut_data_hmap_const_at(&executor->_tasks, sleeping->_buffer[i])->val;
+        if (skip != NULL && skip(&data->_fut)) {
+            continue;
+        }
+        uint64_t at = _z_fut_schedule_get_wake_up_time_ms(data->_schedule);
+        if (!found || at < soonest) {
+            soonest = at;
+            found = true;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    z_clock_t now = z_clock_now();
+    z_clock_t wake_up_time = executor->_epoch;
+    z_clock_advance_ms(&wake_up_time, (unsigned long)soonest);
+    // `zp_clock_elapsed_ms_since(a, b)` is `a - b` clamped at zero: 0 when already due.
+    *out_ms = (uint64_t)zp_clock_elapsed_ms_since(&wake_up_time, &now);
+    return true;
+}
+
 _z_executor_status_t _z_executor_get_next_fut(_z_executor_t *executor, _z_fut_data_hmap_iter_t *task_idx) {
     _z_executor_status_t result;
     result.status = _Z_EXECUTOR_STATE_NO_TASKS;

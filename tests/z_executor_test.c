@@ -486,6 +486,56 @@ static void test_spawn_fail_destroys_future(void) {
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
+// nano-ros: a "link read" that idles 1 ms, and a "lease" that sleeps 400 ms.
+static _z_fut_fn_result_t fn_poll_1ms(void *arg, _z_executor_t *ex) {
+    (void)ex;
+    ((test_arg_t *)arg)->call_count++;
+    return _z_fut_fn_result_wake_up_after(1);
+}
+
+static _z_fut_fn_result_t fn_sleep_400ms(void *arg, _z_executor_t *ex) {
+    (void)ex;
+    ((test_arg_t *)arg)->call_count++;
+    return _z_fut_fn_result_wake_up_after(400);
+}
+
+static bool skip_poll_1ms(const _z_fut_t *fut) { return fut->_fut_fn == fn_poll_1ms; }
+
+// nano-ros: the next wake skips the futures the caller is woken for by other means.
+static void test_next_wake_skips_named_futures(void) {
+    printf("Test: next wake skips the named futures\n");
+    _z_executor_t ex = _z_executor_new();
+    uint64_t ms = 99;
+    assert(!_z_executor_next_wake_ms(&ex, skip_poll_1ms, &ms));
+
+    test_arg_t poll = {0};
+    test_arg_t lease = {0};
+    _z_fut_t f1 = _z_fut_new(&poll, fn_poll_1ms, NULL);
+    _z_fut_t f2 = _z_fut_new(&lease, fn_sleep_400ms, NULL);
+    _z_executor_spawn(&ex, &f1);
+    _z_executor_spawn(&ex, &f2);
+    // Spawned futures are ready: due now.
+    assert(_z_executor_next_wake_ms(&ex, skip_poll_1ms, &ms) && ms == 0);
+
+    _z_executor_spin(&ex);
+    _z_executor_spin(&ex);
+    assert(poll.call_count == 1 && lease.call_count == 1);
+    // Only the poll counts without a skip: ~1 ms. With it, the lease: ~400 ms.
+    assert(_z_executor_next_wake_ms(&ex, NULL, &ms) && ms <= 1);
+    // The schedule keeps whole milliseconds from the executor's epoch, so the answer may round up by one.
+    assert(_z_executor_next_wake_ms(&ex, skip_poll_1ms, &ms) && ms > 300 && ms <= 401);
+
+    // Skipping everything there is: no counted future.
+    _z_executor_t ex2 = _z_executor_new();
+    _z_fut_t f3 = _z_fut_new(&poll, fn_poll_1ms, NULL);
+    _z_executor_spawn(&ex2, &f3);
+    _z_executor_spin(&ex2);
+    assert(!_z_executor_next_wake_ms(&ex2, skip_poll_1ms, &ms));
+
+    _z_executor_destroy(&ex2);
+    _z_executor_destroy(&ex);
+}
+
 int main(void) {
     test_spin_empty();
     test_spawn_with_handle_status_transitions();
@@ -502,6 +552,7 @@ int main(void) {
     test_other_tasks_run_while_suspended();
     test_destroy_cleans_up_suspended();
     test_spawn_fail_destroys_future();
+    test_next_wake_skips_named_futures();
     printf("All executor tests passed.\n");
     return 0;
 }

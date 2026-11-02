@@ -46,8 +46,11 @@
 #include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/transport/common/tx.h"
 #include "zenoh-pico/transport/multicast.h"
+#include "zenoh-pico/transport/multicast/read.h"
+#include "zenoh-pico/transport/raweth/read.h"
 #include "zenoh-pico/transport/transport.h"
 #include "zenoh-pico/transport/unicast.h"
+#include "zenoh-pico/transport/unicast/read.h"
 #include "zenoh-pico/utils/config.h"
 #include "zenoh-pico/utils/endianness.h"
 #include "zenoh-pico/utils/locality.h"
@@ -2586,6 +2589,34 @@ bool zp_spin_once(const z_loaned_session_t *zs) {
         return _z_runtime_spin_once((_z_runtime_t *)&_Z_RC_IN_VAL(zs)->_runtime);
     }
     return false;
+}
+
+// nano-ros: the futures that only poll the link.
+static bool _zp_is_link_read_fut(const _z_fut_t *fut) {
+#if Z_FEATURE_UNICAST_TRANSPORT == 1
+    if (fut->_fut_fn == _zp_unicast_read_task_fn) {
+        return true;
+    }
+#endif
+#if Z_FEATURE_MULTICAST_TRANSPORT == 1
+    if (fut->_fut_fn == _zp_multicast_read_task_fn) {
+        return true;
+    }
+#endif
+#if Z_FEATURE_RAWETH_TRANSPORT == 1
+    if (fut->_fut_fn == _zp_raweth_read_task_fn) {
+        return true;
+    }
+#endif
+    _ZP_UNUSED(fut);
+    return false;
+}
+
+bool zp_next_wake_ms(const z_loaned_session_t *zs, uint64_t *out_ms) {
+    if (z_session_is_closed(zs)) {
+        return false;
+    }
+    return _z_executor_next_wake_ms((const _z_executor_t *)&_Z_RC_IN_VAL(zs)->_runtime, _zp_is_link_read_fut, out_ms);
 }
 #endif
 

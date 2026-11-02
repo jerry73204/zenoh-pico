@@ -3371,6 +3371,24 @@ z_result_t zp_send_join(const z_loaned_session_t *zs, const zp_send_join_options
  */
 bool zp_spin_once(const z_loaned_session_t *zs);
 
+#if Z_FEATURE_MULTI_THREAD == 0
+/**
+ * nano-ros: when the session's executor next has work its caller must wake for.
+ *
+ * Counts every future except the link read futures, which in a single-thread build only poll the link: a caller woken
+ * by its link's receive interrupt does not need to wake for their idle poll. Lease, keep-alive, query timeouts,
+ * reconnect and the advanced publisher/subscriber timers are all counted.
+ *
+ * Parameters:
+ *   zs: Pointer to a :c:type:`z_loaned_session_t`.
+ *   out_ms: Written with the milliseconds until the soonest counted future is due (0 when one is ready now).
+ *
+ * Return:
+ *   ``true`` when a counted future exists, ``false`` when none does or the session is closed.
+ */
+bool zp_next_wake_ms(const z_loaned_session_t *zs, uint64_t *out_ms);
+#endif
+
 #ifdef Z_FEATURE_UNSTABLE_API
 /**
  * Gets the default reliability value (unstable).

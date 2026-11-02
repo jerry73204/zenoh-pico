@@ -235,6 +235,13 @@ typedef struct _z_executor_status_t {
 } _z_executor_status_t;
 
 _z_executor_status_t _z_executor_get_status(const _z_executor_t *executor);
+
+// nano-ros: when the executor next has work, not counting the futures `skip` names.
+// Returns false when no counted future exists. Otherwise writes the milliseconds until
+// the soonest counted future is due (0 when one is ready now) to `*out_ms`. A caller that
+// is woken by its link's receive interrupt passes the link's read future as `skip`: that
+// future only polls the link, so its 1 ms idle wake is not work the caller must wake for.
+bool _z_executor_next_wake_ms(const _z_executor_t *executor, bool (*skip)(const _z_fut_t *fut), uint64_t *out_ms);
 _z_executor_status_t _z_executor_spin(_z_executor_t *executor);
 
 _z_fut_status_t _z_executor_get_fut_status(const _z_executor_t *executor, const _z_fut_handle_t *handle);
