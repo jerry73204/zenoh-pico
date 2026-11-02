@@ -67,6 +67,10 @@ bool _z_background_executor_is_running(const _z_background_executor_t *be);
 // Returns false without doing anything when the background thread is running or another thread holds the executor
 // (try-lock); otherwise returns true when another task is ready to execute immediately.
 bool _z_background_executor_spin_once(_z_background_executor_t *be);
+// nano-ros: `_z_executor_next_wake_ms` under the executor's lock, for a caller-driven executor. Returns false when the
+// background thread is running (it owns the executor) as well as when no counted future exists.
+bool _z_background_executor_next_wake_ms(_z_background_executor_t *be, bool (*skip)(const _z_fut_t *fut),
+                                         uint64_t *out_ms);
 #ifdef __cplusplus
 }
 #endif

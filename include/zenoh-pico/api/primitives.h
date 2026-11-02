@@ -3371,7 +3371,6 @@ z_result_t zp_send_join(const z_loaned_session_t *zs, const zp_send_join_options
  */
 bool zp_spin_once(const z_loaned_session_t *zs);
 
-#if Z_FEATURE_MULTI_THREAD == 0
 /**
  * nano-ros: when the session's executor next has work its caller must wake for.
  *
@@ -3383,11 +3382,13 @@ bool zp_spin_once(const z_loaned_session_t *zs);
  *   zs: Pointer to a :c:type:`z_loaned_session_t`.
  *   out_ms: Written with the milliseconds until the soonest counted future is due (0 when one is ready now).
  *
+ * In a multi-thread build the executor is read under its lock, and only for a session whose background executor thread
+ * was never started (a caller drives it with ``zp_spin_once``); with that thread running the answer is ``false``.
+ *
  * Return:
  *   ``true`` when a counted future exists, ``false`` when none does or the session is closed.
  */
 bool zp_next_wake_ms(const z_loaned_session_t *zs, uint64_t *out_ms);
-#endif
 
 #ifdef Z_FEATURE_UNSTABLE_API
 /**

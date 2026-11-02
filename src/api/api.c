@@ -2590,6 +2590,7 @@ bool zp_spin_once(const z_loaned_session_t *zs) {
     }
     return false;
 }
+#endif
 
 // nano-ros: the futures that only poll the link.
 static bool _zp_is_link_read_fut(const _z_fut_t *fut) {
@@ -2616,9 +2617,13 @@ bool zp_next_wake_ms(const z_loaned_session_t *zs, uint64_t *out_ms) {
     if (z_session_is_closed(zs)) {
         return false;
     }
+#if Z_FEATURE_MULTI_THREAD == 1
+    return _z_background_executor_next_wake_ms((_z_background_executor_t *)&_Z_RC_IN_VAL(zs)->_runtime,
+                                               _zp_is_link_read_fut, out_ms);
+#else
     return _z_executor_next_wake_ms((const _z_executor_t *)&_Z_RC_IN_VAL(zs)->_runtime, _zp_is_link_read_fut, out_ms);
-}
 #endif
+}
 
 #ifdef Z_FEATURE_UNSTABLE_API
 z_reliability_t z_reliability_default(void) { return Z_RELIABILITY_DEFAULT; }

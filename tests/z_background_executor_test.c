@@ -660,6 +660,33 @@ static void test_caller_spin_noop_when_started(void) {
     test_arg_clear(&arg);
 }
 
+// nano-ros: the caller-driven executor answers when it next has work, under its lock, and stays silent while its own
+// thread runs (that thread wakes itself).
+static void test_caller_next_wake_ms(void) {
+    printf("Test: next_wake_ms reads a caller-driven executor and not a running one\n");
+    _z_background_executor_t be;
+    assert(_z_background_executor_init_deferred(&be) == _Z_RES_OK);
+    uint64_t ms = 99;
+    assert(!_z_background_executor_next_wake_ms(&be, NULL, &ms));  // nothing scheduled
+
+    test_arg_t arg;
+    test_arg_init(&arg);
+    arg.wait_ms = 400;
+    _z_fut_t fut = _z_fut_new(&arg, fn_reschedule_once, destroy_fn);
+    assert(_z_background_executor_spawn(&be, &fut, NULL) == _Z_RES_OK);
+    assert(_z_background_executor_next_wake_ms(&be, NULL, &ms) && ms == 0);  // ready now
+    assert(_z_background_executor_spin_once(&be) == false);                  // runs, then sleeps 400 ms
+    assert(_z_background_executor_next_wake_ms(&be, NULL, &ms) && ms > 300 && ms <= 400);
+
+    _z_background_executor_destroy(&be);
+    test_arg_clear(&arg);
+
+    _z_background_executor_t running;
+    assert(_z_background_executor_init(&running, NULL) == _Z_RES_OK);
+    assert(!_z_background_executor_next_wake_ms(&running, NULL, &ms));
+    _z_background_executor_destroy(&running);
+}
+
 int main(void) {
     test_new_destroy_no_tasks();
     test_spawn_runs_task();
@@ -680,6 +707,7 @@ int main(void) {
     test_caller_spin_runs_task();
     test_caller_spin_nested_spawn();
     test_caller_spin_noop_when_started();
+    test_caller_next_wake_ms();
     printf("All background executor tests passed.\n");
     return 0;
 }

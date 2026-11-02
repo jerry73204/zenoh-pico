@@ -312,6 +312,23 @@ bool _z_background_executor_spin_once(_z_background_executor_t *be) {
     return _z_background_executor_inner_spin_once(_Z_RC_IN_VAL(&be->_inner));
 }
 
+bool _z_background_executor_next_wake_ms(_z_background_executor_t *be, bool (*skip)(const _z_fut_t *fut),
+                                         uint64_t *out_ms) {
+    if (_Z_RC_IS_NULL(&be->_inner)) {
+        return false;
+    }
+    _z_background_executor_inner_t *inner = _Z_RC_IN_VAL(&be->_inner);
+    if (_z_atomic_bool_load(&inner->_started, _z_memory_order_acquire)) {
+        return false;  // the background thread owns the executor and wakes itself
+    }
+    if (_z_mutex_lock(&inner->_mutex) != _Z_RES_OK) {
+        return false;
+    }
+    bool found = _z_executor_next_wake_ms(&inner->_executor, skip, out_ms);
+    _z_mutex_unlock(&inner->_mutex);
+    return found;
+}
+
 bool _z_background_executor_is_running(const _z_background_executor_t *be) {
     if (_Z_RC_IS_NULL(&be->_inner)) {
         return false;
