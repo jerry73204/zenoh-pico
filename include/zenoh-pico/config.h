@@ -332,8 +332,12 @@
  *
  * .. warning:: This API has been marked as unstable: it works as advertised, but it may be changed in a future release.
  */
-#define Z_CONFIG_CONNECT_TIMEOUT_KEY 0x57
 #endif
+/* nano-ros: defined, and read by `_z_open`, whether or not the unstable API is
+ * on, so a build can state how long a client open keeps retrying (nano-ros
+ * issue 2207). The value semantics are upstream's: -1 forever, 0 one attempt,
+ * N milliseconds. */
+#define Z_CONFIG_CONNECT_TIMEOUT_KEY 0x57
 #define Z_CONFIG_CONNECT_TIMEOUT_DEFAULT "0"
 
 #ifdef Z_FEATURE_UNSTABLE_API

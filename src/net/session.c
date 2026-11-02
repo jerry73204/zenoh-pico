@@ -444,9 +444,10 @@ z_result_t _z_open_locators(_z_session_rc_t *zn, const _z_string_svec_t *listen_
         return _Z_ERR_CONFIG_INVALID_VALUE;
     }
 
-    if (!_z_str_parse_i32(Z_CONFIG_CONNECT_TIMEOUT_DEFAULT, &connect_timeout_ms)) {
-        return _Z_ERR_CONFIG_INVALID_VALUE;
-    }
+    // nano-ros (issue 2207): the connect budget is read from the config here too,
+    // so a build without the unstable API can still state it.
+    _Z_RETURN_IF_ERR(_z_config_get_i32_default(config, Z_CONFIG_CONNECT_TIMEOUT_KEY, Z_CONFIG_CONNECT_TIMEOUT_DEFAULT,
+                                               &connect_timeout_ms));
     _Z_RETURN_IF_ERR(_z_validate_open_timeout(connect_timeout_ms));
 
     if (!_z_str_parse_bool(_z_open_connect_exit_on_failure_default(mode), &connect_exit_on_failure)) {
