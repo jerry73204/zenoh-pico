@@ -32,6 +32,12 @@
 // `struct timeval`). The `_z_socket_*` no-op stubs for the empty
 // `_z_sys_net_socket_t` are defined further down — see "ORIN_SPE
 // network stubs" near the bottom of this file.
+#elif defined(ZP_SYSTEM_PLATFORM_HEADER)
+// nano-ros issue 2342 — a CUSTOM platform header (zenoh-pico's own
+// `ZP_SYSTEM_PLATFORM_HEADER` hook) pairs these FreeRTOS system primitives with
+// a socket layer of its own: the FreeRTOS POSIX port, whose network is the host
+// kernel's BSD sockets (`system/unix/network.c` + `link/transport/*/*_posix.c`).
+// No netstack header to include here; the custom header names its sockets.
 #else
 #error "FreeRTOS System Implementation was used but no compatible network stack was selected"
 #endif
@@ -57,7 +63,9 @@ uint32_t z_random_u32(void) {
     return ret;
 #elif defined(ZENOH_FREERTOS_LWIP)
     return LWIP_RAND();
-#elif defined(ZENOH_ORIN_SPE)
+#elif defined(ZENOH_ORIN_SPE) || defined(ZP_SYSTEM_PLATFORM_HEADER)
+    // nano-ros issue 2342 — a custom platform header has no netstack RNG to
+    // borrow either; nano-ros builds take `Z_FEATURE_NROS_PLATFORM_RANDOM`.
     // Phase 11.3.B — no hardware RNG on the SPE, no lwIP /
     // FreeRTOS-Plus-TCP. xorshift32 seeded from the FreeRTOS tick
     // counter; adequate for zenoh-pico's SN / scout-jitter needs,
