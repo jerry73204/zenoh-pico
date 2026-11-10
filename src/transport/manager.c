@@ -65,7 +65,7 @@ static void _z_new_peer_dispatch_connected_event(_z_transport_unicast_t *ztu, co
 #endif
 
 static z_result_t _z_new_transport_client(_z_transport_t *zt, const _z_string_t *locator, const _z_id_t *local_zid,
-                                          const _z_config_t *session_cfg) {
+                                          const _z_config_t *session_cfg, const z_clock_t *open_deadline) {
     z_result_t ret = _Z_RES_OK;
     // Init link
     _z_link_t *zl = (_z_link_t *)z_malloc(sizeof(_z_link_t));
@@ -84,7 +84,7 @@ static z_result_t _z_new_transport_client(_z_transport_t *zt, const _z_string_t 
         // Unicast transport
         case Z_LINK_CAP_TRANSPORT_UNICAST: {
             _z_transport_unicast_establish_param_t tp_param;
-            ret = _z_unicast_open_client(&tp_param, zl, local_zid);
+            ret = _z_unicast_open_client(&tp_param, zl, local_zid, open_deadline);
             if (ret != _Z_RES_OK) {
                 _z_link_free(&zl);
                 return ret;
@@ -119,7 +119,8 @@ static z_result_t _z_new_transport_client(_z_transport_t *zt, const _z_string_t 
 }
 
 static z_result_t _z_new_transport_peer(_z_transport_t *zt, const _z_string_t *locator, const _z_id_t *local_zid,
-                                        int peer_op, const _z_config_t *session_cfg, _z_runtime_t *runtime) {
+                                        int peer_op, const _z_config_t *session_cfg, _z_runtime_t *runtime,
+                                        const z_clock_t *open_deadline) {
     z_result_t ret = _Z_RES_OK;
 #if Z_FEATURE_LINK_TCP != 1 && Z_FEATURE_LINK_TLS != 1
     _ZP_UNUSED(runtime);
@@ -144,7 +145,7 @@ static z_result_t _z_new_transport_peer(_z_transport_t *zt, const _z_string_t *l
         case Z_LINK_CAP_TRANSPORT_UNICAST: {
 #if Z_FEATURE_UNICAST_PEER == 1
             _z_transport_unicast_establish_param_t tp_param = {0};
-            ret = _z_unicast_open_peer(&tp_param, zl, local_zid, peer_op, NULL);
+            ret = _z_unicast_open_peer(&tp_param, zl, local_zid, peer_op, NULL, open_deadline);
             if (ret != _Z_RES_OK) {
                 _z_link_free(&zl);
                 return ret;
@@ -198,13 +199,14 @@ static z_result_t _z_new_transport_peer(_z_transport_t *zt, const _z_string_t *l
 }
 
 z_result_t _z_new_transport(_z_transport_t *zt, const _z_id_t *bs, const _z_string_t *locator, z_whatami_t mode,
-                            int peer_op, const _z_config_t *session_cfg, _z_runtime_t *runtime) {
+                            int peer_op, const _z_config_t *session_cfg, _z_runtime_t *runtime,
+                            const z_clock_t *open_deadline) {
     z_result_t ret;
 
     if (mode == Z_WHATAMI_CLIENT) {
-        ret = _z_new_transport_client(zt, locator, bs, session_cfg);
+        ret = _z_new_transport_client(zt, locator, bs, session_cfg, open_deadline);
     } else {
-        ret = _z_new_transport_peer(zt, locator, bs, peer_op, session_cfg, runtime);
+        ret = _z_new_transport_peer(zt, locator, bs, peer_op, session_cfg, runtime, open_deadline);
     }
 
     return ret;
@@ -223,7 +225,7 @@ z_result_t _z_new_peer(_z_transport_t *zt, const _z_id_t *session_id, const _z_s
             _Z_RETURN_IF_ERR(ret);
             _z_transport_unicast_establish_param_t tp_param = {0};
             ret = _z_unicast_open_peer(&tp_param, zt->_transport._unicast._common._link, session_id, _Z_PEER_OP_OPEN,
-                                       &socket);
+                                       &socket, NULL);
             if (ret != _Z_RES_OK) {
 #if Z_FEATURE_LINK_TLS == 1
                 _z_close_tls_socket(&socket);

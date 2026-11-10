@@ -29,8 +29,12 @@ enum _z_peer_op_e {
     _Z_PEER_OP_LISTEN = 1,
 };
 
+// nano-ros (issue 2389): `open_deadline`, when not NULL, bounds the opening
+// handshake (see `_z_unicast_open_client`). NULL keeps the handshake's own
+// Z_TRANSPORT_CONNECT_TIMEOUT.
 z_result_t _z_new_transport(_z_transport_t *zt, const _z_id_t *bs, const _z_string_t *locator, z_whatami_t mode,
-                            int peer_op, const _z_config_t *session_cfg, _z_runtime_t *runtime);
+                            int peer_op, const _z_config_t *session_cfg, _z_runtime_t *runtime,
+                            const z_clock_t *open_deadline);
 z_result_t _z_new_peer(_z_transport_t *zt, const _z_id_t *session_id, const _z_string_t *locator,
                        const _z_config_t *session_cfg);
 bool _z_transport_open_error_is_retryable(z_result_t ret);

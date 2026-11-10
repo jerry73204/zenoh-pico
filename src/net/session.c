@@ -131,11 +131,12 @@ static z_result_t _z_config_get_mode(const _z_config_t *config, z_whatami_t *mod
 }
 
 static z_result_t _z_open_inner(_z_session_rc_t *zs, _z_string_t *locator, const _z_id_t *zid, int peer_op,
-                                const _z_config_t *config) {
+                                const _z_config_t *config, const z_clock_t *open_deadline) {
     z_result_t ret = _Z_RES_OK;
     _z_session_t *zn = _Z_RC_IN_VAL(zs);
 
-    ret = _z_new_transport(&zn->_tp, zid, locator, zn->_mode, peer_op, config, &_Z_RC_IN_VAL(zs)->_runtime);
+    ret = _z_new_transport(&zn->_tp, zid, locator, zn->_mode, peer_op, config, &_Z_RC_IN_VAL(zs)->_runtime,
+                           open_deadline);
     if (ret != _Z_RES_OK) {
         return ret;
     }
@@ -207,6 +208,19 @@ static z_result_t _z_open_connect_locator(_z_session_rc_t *zn, _z_pending_peers_
     z_clock_t now = z_clock_now();
     uint32_t sleep_ms = _Z_SLEEP_BACKOFF_MIN_MS;
 
+    // nano-ros (issue 2389): a positive budget bounds every attempt's
+    // handshake too, not only the retry loop. Before this the loop checked the
+    // budget only between attempts, so one attempt against a peer that accepts
+    // TCP and never answers ran its full Z_TRANSPORT_CONNECT_TIMEOUT (10 s)
+    // whatever the budget was. 0 (one attempt) and -1 (forever) keep the
+    // per-attempt deadline as it was.
+    z_clock_t budget_deadline = now;
+    const z_clock_t *open_deadline = NULL;
+    if (timeout_ms > 0) {
+        z_clock_advance_ms(&budget_deadline, (unsigned long)timeout_ms);
+        open_deadline = &budget_deadline;
+    }
+
     while (!out->transport_opened) {
         _Z_DEBUG("Attempting to open %zu connect locator(s)", connect_len);
 
@@ -218,7 +232,7 @@ static z_result_t _z_open_connect_locator(_z_session_rc_t *zn, _z_pending_peers_
 
             _z_string_t *locator = &peer->_locator;
 
-            ret = _z_open_inner(zn, locator, zid, _Z_PEER_OP_OPEN, config);
+            ret = _z_open_inner(zn, locator, zid, _Z_PEER_OP_OPEN, config, open_deadline);
             if (ret == _Z_RES_OK) {
                 out->transport_opened = true;
                 peer->_state = _Z_PENDING_PEER_STATE_DONE;
@@ -292,7 +306,7 @@ z_result_t _z_open_bind_listener(_z_session_rc_t *zn, _z_string_t *locator, cons
     uint32_t sleep_ms = _Z_SLEEP_BACKOFF_MIN_MS;
 
     while (ret != _Z_RES_OK) {
-        ret = _z_open_inner(zn, locator, zid, _Z_PEER_OP_LISTEN, config);
+        ret = _z_open_inner(zn, locator, zid, _Z_PEER_OP_LISTEN, config, NULL);
         if (ret == _Z_RES_OK) {
             return _Z_RES_OK;
         }

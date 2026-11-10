@@ -115,9 +115,17 @@ z_result_t _z_unicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
 }
 
 static z_result_t _z_unicast_handshake_open(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                            const _z_id_t *local_zid, z_whatami_t mode, _z_sys_net_socket_t *socket) {
+                                            const _z_id_t *local_zid, z_whatami_t mode, _z_sys_net_socket_t *socket,
+                                            const z_clock_t *open_deadline) {
     z_clock_t recv_deadline = z_clock_now();
     z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);
+    // nano-ros (issue 2389): a connect budget bounds the WHOLE open, so the
+    // handshake gives up at whichever comes first: its own deadline or the
+    // caller's budget. Without this a peer that accepts the TCP connect and
+    // never answers held a 3 s budget for Z_TRANSPORT_CONNECT_TIMEOUT (10 s).
+    if ((open_deadline != NULL) && (zp_clock_elapsed_ms_since(&recv_deadline, (z_clock_t *)open_deadline) > 0)) {
+        recv_deadline = *open_deadline;
+    }
 
     _z_transport_message_t ism = _z_t_msg_make_init_syn(mode, *local_zid);
     param->_seq_num_res = ism._body._init._seq_num_res;  // The announced sn resolution
@@ -313,12 +321,13 @@ z_result_t _z_unicast_handshake_listen(_z_transport_unicast_establish_param_t *p
 }
 
 z_result_t _z_unicast_open_client(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                  const _z_id_t *local_zid) {
-    return _z_unicast_handshake_open(param, zl, local_zid, Z_WHATAMI_CLIENT, NULL);
+                                  const _z_id_t *local_zid, const z_clock_t *open_deadline) {
+    return _z_unicast_handshake_open(param, zl, local_zid, Z_WHATAMI_CLIENT, NULL, open_deadline);
 }
 
 z_result_t _z_unicast_open_peer(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                const _z_id_t *local_zid, int peer_op, _z_sys_net_socket_t *socket) {
+                                const _z_id_t *local_zid, int peer_op, _z_sys_net_socket_t *socket,
+                                const z_clock_t *open_deadline) {
     z_result_t ret = _Z_RES_OK;
 
     // Init sn tx
@@ -326,7 +335,7 @@ z_result_t _z_unicast_open_peer(_z_transport_unicast_establish_param_t *param, c
     param->_initial_sn_tx = param->_initial_sn_tx & !_z_sn_modulo_mask(param->_seq_num_res);
 
     if (peer_op == _Z_PEER_OP_OPEN) {
-        ret = _z_unicast_handshake_open(param, zl, local_zid, Z_WHATAMI_PEER, socket);
+        ret = _z_unicast_handshake_open(param, zl, local_zid, Z_WHATAMI_PEER, socket, open_deadline);
     } else {
         // Initialize common parameters
         param->_lease = Z_TRANSPORT_LEASE;
@@ -367,15 +376,18 @@ z_result_t _z_unicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
 }
 
 z_result_t _z_unicast_open_client(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                  const _z_id_t *local_zid) {
+                                  const _z_id_t *local_zid, const z_clock_t *open_deadline) {
     _ZP_UNUSED(param);
     _ZP_UNUSED(zl);
     _ZP_UNUSED(local_zid);
+    _ZP_UNUSED(open_deadline);
     _Z_ERROR_RETURN(_Z_ERR_TRANSPORT_NOT_AVAILABLE);
 }
 
 z_result_t _z_unicast_open_peer(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                const _z_id_t *local_zid, int peer_op, _z_sys_net_socket_t *socket) {
+                                const _z_id_t *local_zid, int peer_op, _z_sys_net_socket_t *socket,
+                                const z_clock_t *open_deadline) {
+    _ZP_UNUSED(open_deadline);
     _ZP_UNUSED(param);
     _ZP_UNUSED(zl);
     _ZP_UNUSED(local_zid);

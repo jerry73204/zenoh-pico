@@ -25,10 +25,14 @@ z_result_t _z_unicast_transport_create(_z_transport_t *zt, _z_link_t *zl,
                                        _z_transport_unicast_establish_param_t *param);
 z_result_t _z_unicast_handshake_listen(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
                                        const _z_id_t *local_zid, z_whatami_t mode, _z_sys_net_socket_t *socket);
+// nano-ros (issue 2389): `open_deadline`, when not NULL, is the caller's connect
+// budget as an instant. The handshake gives up at it or at its own
+// Z_TRANSPORT_CONNECT_TIMEOUT, whichever comes first.
 z_result_t _z_unicast_open_client(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                  const _z_id_t *local_zid);
+                                  const _z_id_t *local_zid, const z_clock_t *open_deadline);
 z_result_t _z_unicast_open_peer(_z_transport_unicast_establish_param_t *param, const _z_link_t *zl,
-                                const _z_id_t *local_zid, int peer_op, _z_sys_net_socket_t *socket);
+                                const _z_id_t *local_zid, int peer_op, _z_sys_net_socket_t *socket,
+                                const z_clock_t *open_deadline);
 z_result_t _z_unicast_send_close(_z_transport_unicast_t *ztu, uint8_t reason, bool link_only);
 z_result_t _z_unicast_transport_close(_z_transport_unicast_t *ztu, uint8_t reason);
 void _z_unicast_transport_clear(_z_transport_unicast_t *ztu);
