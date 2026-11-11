@@ -74,7 +74,7 @@ static z_result_t _z_new_transport_client(_z_transport_t *zt, const _z_string_t 
     }
     memset(zl, 0, sizeof(_z_link_t));
     // Open link
-    ret = _z_open_link(zl, locator, session_cfg);
+    ret = _z_open_link(zl, locator, session_cfg, open_deadline);
     if (ret != _Z_RES_OK) {
         z_free(zl);
         return ret;
@@ -133,7 +133,7 @@ static z_result_t _z_new_transport_peer(_z_transport_t *zt, const _z_string_t *l
     memset(zl, 0, sizeof(_z_link_t));
     // Listen link
     if (peer_op == _Z_PEER_OP_OPEN) {
-        ret = _z_open_link(zl, locator, session_cfg);
+        ret = _z_open_link(zl, locator, session_cfg, open_deadline);
     } else {
         ret = _z_listen_link(zl, locator, session_cfg);
     }

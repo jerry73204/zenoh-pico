@@ -189,12 +189,19 @@ typedef struct _z_link_t {
 
     uint16_t _mtu;
     _z_link_capabilities_t _cap;
+    // nano-ros (issue 2437): the caller's connect budget as an instant, set by
+    // `_z_open_link` for the duration of `_open_f` and NULL otherwise. A link
+    // whose open can wait on the network (the TCP connect) gives up at it.
+    const z_clock_t *_open_deadline;
 } _z_link_t;
 
 void _z_link_clear(_z_link_t *zl);
 void _z_link_free(_z_link_t **zl);
 z_result_t _z_open_socket(const _z_string_t *locator, const _z_config_t *session_cfg, _z_sys_net_socket_t *socket);
-z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_config_t *session_cfg);
+// nano-ros (issues 2389/2437): `open_deadline` is the budget the handshake
+// gets too (`_z_new_transport`); NULL leaves the link open to its own bounds.
+z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_config_t *session_cfg,
+                        const z_clock_t *open_deadline);
 z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_config_t *session_cfg);
 
 z_result_t _z_link_send_wbuf(const _z_link_t *zl, const _z_wbuf_t *wbf, _z_sys_net_socket_t *socket);

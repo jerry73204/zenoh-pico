@@ -48,7 +48,7 @@ typedef struct {
 static z_result_t _z_scout_open_link(_z_link_t *link, const _z_string_t *locator, const char *iface) {
     memset(link, 0, sizeof(*link));
     if (iface == NULL) {
-        return _z_open_link(link, locator, NULL);
+        return _z_open_link(link, locator, NULL, NULL);
     }
 
     _z_endpoint_t endpoint;

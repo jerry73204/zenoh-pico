@@ -38,6 +38,16 @@ z_result_t _z_tcp_endpoint_init_from_address(_z_sys_net_endpoint_t *ep, const _z
 
 // flawfinder: ignore
 z_result_t _z_tcp_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout);
+// nano-ros (issue 2437): `_z_tcp_open` whose connect gives up after
+// `connect_timeout_ms`; negative means no bound (the stack's own, as
+// `_z_tcp_open`). A platform that can bound its connect defines
+// Z_TCP_OPEN_WITHIN and implements this; elsewhere `link/unicast/tcp.c`
+// supplies one that ignores the bound.
+#if defined(ZP_PLATFORM_SOCKET_POSIX) || defined(ZP_PLATFORM_SOCKET_ZEPHYR)
+#define Z_TCP_OPEN_WITHIN 1
+#endif
+z_result_t _z_tcp_open_within(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout,
+                              int32_t connect_timeout_ms);
 z_result_t _z_tcp_listen(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint);
 z_result_t _z_tcp_accept(const _z_sys_net_socket_t *sock_in, _z_sys_net_socket_t *sock_out);
 void _z_tcp_close(_z_sys_net_socket_t *sock);

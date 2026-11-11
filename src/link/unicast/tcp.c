@@ -43,8 +43,27 @@ z_result_t _z_f_link_open_tcp(_z_link_t *zl) {
         tout = (uint32_t)strtoul(tout_as_str, NULL, 10);
     }
 
-    return _z_tcp_open(&zl->_socket._tcp._sock, zl->_socket._tcp._rep, tout);
+    // nano-ros (issue 2437): the connect shares the open's budget with the
+    // handshake (issue 2389), so a peer that drops the SYN ends the attempt at
+    // the budget, not at the stack's own SYN-retry limit (about 127 s on Linux).
+    int32_t connect_timeout_ms = -1;
+    if (zl->_open_deadline != NULL) {
+        z_clock_t now = z_clock_now();
+        unsigned long remaining = zp_clock_elapsed_ms_since((z_clock_t *)zl->_open_deadline, &now);
+        // At least 1 ms: a spent budget still makes one non-blocking attempt
+        // rather than none, which is what the retry loop expects of an attempt.
+        connect_timeout_ms = (remaining == 0) ? 1 : (remaining > INT32_MAX ? INT32_MAX : (int32_t)remaining);
+    }
+    return _z_tcp_open_within(&zl->_socket._tcp._sock, zl->_socket._tcp._rep, tout, connect_timeout_ms);
 }
+
+#if !defined(Z_TCP_OPEN_WITHIN)
+z_result_t _z_tcp_open_within(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout,
+                              int32_t connect_timeout_ms) {
+    _ZP_UNUSED(connect_timeout_ms);
+    return _z_tcp_open(sock, endpoint, tout);
+}
+#endif
 
 z_result_t _z_f_link_listen_tcp(_z_link_t *zl) { return _z_tcp_listen(&zl->_socket._tcp._sock, zl->_socket._tcp._rep); }
 

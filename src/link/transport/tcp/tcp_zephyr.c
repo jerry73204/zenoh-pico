@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <zephyr/net/socket.h>
 
+#include "tcp_connect_within.h"
 #include "zenoh-pico/config.h"
 #include "zenoh-pico/utils/logging.h"
 #include "zenoh-pico/utils/pointers.h"
@@ -59,7 +60,8 @@ static void _z_tcp_zephyr_endpoint_clear(_z_sys_net_endpoint_t *ep) {
     ep->_iptcp = NULL;
 }
 
-static z_result_t _z_tcp_zephyr_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout) {
+static z_result_t _z_tcp_zephyr_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout,
+                                     int32_t connect_timeout_ms) {
     z_result_t ret = _Z_RES_OK;
 
     sock->_fd = socket(endpoint._iptcp->ai_family, endpoint._iptcp->ai_socktype, endpoint._iptcp->ai_protocol);
@@ -93,7 +95,8 @@ static z_result_t _z_tcp_zephyr_open(_z_sys_net_socket_t *sock, const _z_sys_net
 #endif
 
         for (struct zsock_addrinfo *it = endpoint._iptcp; it != NULL; it = it->ai_next) {
-            if ((ret == _Z_RES_OK) && (connect(sock->_fd, it->ai_addr, it->ai_addrlen) < 0)) {
+            if ((ret == _Z_RES_OK) &&
+                (_z_tcp_connect_within(sock->_fd, it->ai_addr, it->ai_addrlen, connect_timeout_ms) < 0)) {
                 if (it->ai_next == NULL) {
                     _Z_ERROR_LOG(_Z_ERR_GENERIC);
                     ret = _Z_ERR_GENERIC;
@@ -234,7 +237,12 @@ z_result_t _z_tcp_endpoint_init(_z_sys_net_endpoint_t *ep, const char *address, 
 void _z_tcp_endpoint_clear(_z_sys_net_endpoint_t *ep) { _z_tcp_zephyr_endpoint_clear(ep); }
 
 z_result_t _z_tcp_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout) {
-    return _z_tcp_zephyr_open(sock, endpoint, tout);
+    return _z_tcp_zephyr_open(sock, endpoint, tout, -1);
+}
+
+z_result_t _z_tcp_open_within(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout,
+                              int32_t connect_timeout_ms) {
+    return _z_tcp_zephyr_open(sock, endpoint, tout, connect_timeout_ms);
 }
 
 z_result_t _z_tcp_listen(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint) {

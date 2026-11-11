@@ -42,7 +42,8 @@ z_result_t _z_open_socket(const _z_string_t *locator, const _z_config_t *session
     return ret;
 }
 
-z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_config_t *session_cfg) {
+z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_config_t *session_cfg,
+                        const z_clock_t *open_deadline) {
 #if Z_FEATURE_LINK_TLS != 1
     _ZP_UNUSED(session_cfg);
 #endif
@@ -106,7 +107,10 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
         }
         if (ret == _Z_RES_OK) {
             // Open transport link for communication
-            if (zl->_open_f(zl) != _Z_RES_OK) {
+            zl->_open_deadline = open_deadline;
+            z_result_t open_ret = zl->_open_f(zl);
+            zl->_open_deadline = NULL;
+            if (open_ret != _Z_RES_OK) {
                 _Z_ERROR_LOG(_Z_ERR_TRANSPORT_OPEN_FAILED);
                 ret = _Z_ERR_TRANSPORT_OPEN_FAILED;
                 _z_link_clear(zl);
