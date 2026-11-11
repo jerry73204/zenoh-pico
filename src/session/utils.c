@@ -86,6 +86,7 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
     // Initialize the counters to 1
     _z_atomic_size_init(&zn->_entity_id, 1);
     _z_atomic_bool_init(&zn->_tp_ready, false);
+    zn->_link_tx_failures = 0;
     zn->_resource_id = 1;
     zn->_query_id = 1;
     zn->_last_timestamp = 0;

@@ -459,6 +459,17 @@ _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *execut
     if (mode == Z_WHATAMI_CLIENT) {
         _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(ztu->_peers);
         assert(curr_peer != NULL);
+        // nano-ros issue 2389 -- a write on the link failed: the router stopped
+        // taking bytes, or the link broke part-way through a frame. Its byte
+        // stream cannot be trusted again, so close the session (and reconnect
+        // where that is built in) instead of waiting for a lease that, with
+        // the router still sending keep-alives, never expires.
+        if ((ztu->_common._link != NULL) && ztu->_common._link->_tx_broken) {
+            _z_session_t *zs = _z_transport_common_get_session(&ztu->_common);
+            zs->_link_tx_failures++;
+            _Z_INFO("Closing session because a write on its link failed");
+            return _zp_unicast_failed_result(ztu, executor);
+        }
         size_t to_read = 0;
         // Retrieve data
         if (!_z_unicast_client_read(ztu, curr_peer, &to_read)) {

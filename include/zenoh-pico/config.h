@@ -68,6 +68,14 @@
 #ifndef Z_TRANSPORT_CONNECT_TIMEOUT
 #define Z_TRANSPORT_CONNECT_TIMEOUT 10000
 #endif
+/* nano-ros issue 2389: how long a stream link's write may take no byte before
+ * the write fails and the session closes the link. The same rule and default
+ * as zenoh's `congestion_control.block.wait_before_close` (5 s). Each wait for
+ * room inside it is one Z_CONFIG_SOCKET_TIMEOUT, so a port that serialises
+ * send and receive on one socket (Zephyr) still lets the read task in. */
+#ifndef Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE
+#define Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE 5000
+#endif
 
 /* #undef Z_FEATURE_UNSTABLE_API */
 #ifndef Z_FEATURE_CONNECTIVITY

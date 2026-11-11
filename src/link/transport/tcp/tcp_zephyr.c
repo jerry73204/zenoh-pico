@@ -24,6 +24,7 @@
 #include <zephyr/net/socket.h>
 
 #include "tcp_connect_within.h"
+#include "tcp_write_within.h"
 #include "zenoh-pico/config.h"
 #include "zenoh-pico/utils/logging.h"
 #include "zenoh-pico/utils/pointers.h"
@@ -226,8 +227,11 @@ static size_t _z_tcp_zephyr_read_exact(_z_sys_net_socket_t sock, uint8_t *ptr, s
     return n;
 }
 
+// nano-ros issue 2389: bounded, see tcp_write_within.h. A plain blocking send
+// to a peer that stopped reading never returned, and held the per-fd lock the
+// read task needs for as long as it waited.
 static size_t _z_tcp_zephyr_write(_z_sys_net_socket_t sock, const uint8_t *ptr, size_t len) {
-    return (size_t)send(sock._fd, ptr, len, 0);
+    return _z_tcp_write_within(sock._fd, ptr, len, 0);
 }
 
 z_result_t _z_tcp_endpoint_init(_z_sys_net_endpoint_t *ep, const char *address, const char *port) {

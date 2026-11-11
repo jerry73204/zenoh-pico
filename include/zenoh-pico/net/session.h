@@ -136,6 +136,12 @@ typedef struct _z_session_t {
      * fails at once instead of waiting for the reconnect, which holds that
      * mutex across a blocking `_z_open`. */
     _z_atomic_bool_t _tp_ready;
+    /* nano-ros issue 2389 -- how many times the read task closed this
+     * session's transport because a write on its stream link failed (the peer
+     * stopped taking bytes for Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE, or the link
+     * broke mid-write). Kept across reconnects; read with
+     * `zp_session_link_tx_failures`. */
+    volatile uint32_t _link_tx_failures;
 
     // Zenoh PID
     _z_id_t _local_zid;

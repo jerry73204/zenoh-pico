@@ -3132,6 +3132,21 @@ z_entity_global_id_t z_subscriber_id(const z_loaned_subscriber_t *subscriber);
 #endif
 #endif
 
+/**
+ * nano-ros (issue 2389): how many times this session closed its transport
+ * because a write on its stream link failed: the peer took no byte for
+ * ``Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE`` milliseconds, or the link broke part-way
+ * through a write. The count survives reconnects, so a caller that remembers
+ * the last value it saw can tell when a new close happened.
+ *
+ * Parameters:
+ *   zs: Pointer to a :c:type:`z_loaned_session_t`.
+ *
+ * Return:
+ *   The count, ``0`` for a NULL session.
+ */
+uint32_t zp_session_link_tx_failures(const z_loaned_session_t *zs);
+
 #if Z_FEATURE_BATCHING == 1
 
 /**

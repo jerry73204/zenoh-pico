@@ -107,6 +107,7 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
         }
         if (ret == _Z_RES_OK) {
             // Open transport link for communication
+            zl->_tx_broken = false;
             zl->_open_deadline = open_deadline;
             z_result_t open_ret = zl->_open_f(zl);
             zl->_open_deadline = NULL;
@@ -172,6 +173,7 @@ z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_co
             ret = _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
         }
         if (ret == _Z_RES_OK) {
+            zl->_tx_broken = false;
             // Open transport link for listening
             if (zl->_listen_f(zl) != _Z_RES_OK) {
                 _Z_ERROR_LOG(_Z_ERR_TRANSPORT_OPEN_FAILED);
@@ -248,6 +250,11 @@ size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_
 z_result_t _z_link_send_wbuf(const _z_link_t *link, const _z_wbuf_t *wbf, _z_sys_net_socket_t *socket) {
     z_result_t ret = _Z_RES_OK;
     bool link_is_streamed = link->_cap._flow == Z_LINK_CAP_FLOW_STREAM;
+    // nano-ros (issue 2389): a stream whose earlier write failed may have ended
+    // mid-frame; writing after it would hand the peer garbage.
+    if (link->_tx_broken) {
+        return _Z_ERR_TRANSPORT_TX_FAILED;
+    }
 
     for (size_t i = 0; (i < _z_wbuf_len_iosli(wbf)) && (ret == _Z_RES_OK); i++) {
         _z_slice_t bs = _z_iosli_to_bytes(_z_wbuf_get_iosli(wbf, i));
@@ -269,6 +276,12 @@ z_result_t _z_link_send_wbuf(const _z_link_t *link, const _z_wbuf_t *wbf, _z_sys
         } while (n > (size_t)0);
     }
 
+    // Only the link's own socket: a peer socket's failure is that peer's.
+    if ((ret != _Z_RES_OK) && link_is_streamed && (socket == NULL)) {
+        // The one mutable field this const view writes: the link outlives
+        // every caller, and the flag is read by the transport's read task.
+        ((_z_link_t *)link)->_tx_broken = true;
+    }
     return ret;
 }
 

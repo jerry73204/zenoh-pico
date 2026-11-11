@@ -2474,6 +2474,13 @@ z_entity_global_id_t z_subscriber_id(const z_loaned_subscriber_t *subscriber) {
 #endif
 #endif
 
+uint32_t zp_session_link_tx_failures(const z_loaned_session_t *zs) {
+    if ((zs == NULL) || _Z_RC_IS_NULL(zs)) {
+        return 0;
+    }
+    return _Z_RC_IN_VAL(zs)->_link_tx_failures;
+}
+
 #if Z_FEATURE_BATCHING == 1
 z_result_t zp_batch_start(const z_loaned_session_t *zs) {
     if (_Z_RC_IS_NULL(zs)) {

@@ -24,7 +24,9 @@
 
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "zenoh-pico/config.h"
 #include "zenoh-pico/link/transport/lwip_socket.h"
+#include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/utils/logging.h"
 #include "zenoh-pico/utils/pointers.h"
 
@@ -419,9 +421,15 @@ static size_t _z_tcp_lwip_write(_z_sys_net_socket_t sock, const uint8_t *ptr, si
     // dozen segments), so a burst of small writes — e.g. the DECLARE
     // storm of a many-entity session open — short-writes or fails with
     // ERR_MEM/EWOULDBLOCK long before the unix-sized buffers would.
-    // Loop select+send until every byte is accepted; each iteration
-    // gets the full socket timeout, so a stalled peer still errors out.
+    // Loop select+send until every byte is accepted. Each select waits one
+    // socket timeout; the write fails when no byte has been taken for
+    // Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE (nano-ros issue 2389), the same rule
+    // as tcp_write_within.h on the BSD ports. It used to fail on the FIRST
+    // empty select, i.e. after 100 ms of a full window, and a failure after
+    // partial progress leaves the stream mid-frame: the link must close
+    // either way, so the bound is the stall, not one window.
     size_t sent = 0;
+    z_clock_t last_progress = z_clock_now();
     while (sent < len) {
         fd_set write_fds;
         FD_ZERO(&write_fds);
@@ -432,8 +440,14 @@ static size_t _z_tcp_lwip_write(_z_sys_net_socket_t sock, const uint8_t *ptr, si
         tv.tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % (uint32_t)1000) * (uint32_t)1000;
 
         int ready = lwip_select(_z_lwip_socket_get(sock) + 1, NULL, &write_fds, NULL, &tv);
-        if (ready <= 0) {
+        if (ready < 0) {
             return SIZE_MAX;
+        }
+        if (ready == 0) {
+            if (z_clock_elapsed_ms(&last_progress) >= (unsigned long)Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE) {
+                return SIZE_MAX;
+            }
+            continue;
         }
 
         int wb = send(_z_lwip_socket_get(sock), ptr + sent, len - sent, 0);
@@ -443,12 +457,16 @@ static size_t _z_tcp_lwip_write(_z_sys_net_socket_t sock, const uint8_t *ptr, si
             // (TCP_SND_QUEUELEN) is exhausted even though byte-space
             // remains. Yield until ACKs free segments, then retry.
             if (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOMEM) {
+                if (z_clock_elapsed_ms(&last_progress) >= (unsigned long)Z_TRANSPORT_TX_WAIT_BEFORE_CLOSE) {
+                    return SIZE_MAX;
+                }
                 z_sleep_ms(1);
                 continue;
             }
             return SIZE_MAX;
         }
         sent += (size_t)wb;
+        last_progress = z_clock_now();
     }
 
     return sent;

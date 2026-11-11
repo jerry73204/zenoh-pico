@@ -193,6 +193,11 @@ typedef struct _z_link_t {
     // `_z_open_link` for the duration of `_open_f` and NULL otherwise. A link
     // whose open can wait on the network (the TCP connect) gives up at it.
     const z_clock_t *_open_deadline;
+    // nano-ros (issue 2389): set when a write on the link's own socket of a
+    // STREAM link failed or stopped part-way. The peer's byte stream may then
+    // end mid-frame, so nothing more is written to it (`_z_link_send_wbuf`
+    // refuses), and the unicast read task closes the session on seeing it.
+    volatile bool _tx_broken;
 } _z_link_t;
 
 void _z_link_clear(_z_link_t *zl);
