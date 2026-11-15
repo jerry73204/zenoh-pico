@@ -122,6 +122,16 @@ typedef struct _z_session_t {
 #if Z_FEATURE_MULTI_THREAD == 1
     _z_mutex_t _mutex_inner;
     _z_mutex_rec_t _mutex_transport;
+    /* nano-ros issue 2596 -- how many sends are inside `_tp` right now. A send
+     * holds a USE of the transport, not `_mutex_transport`, so a slow link
+     * write no longer serialises every other send behind it (that hold made
+     * TX_SPLIT_LOCK do nothing). A teardown marks `_tp_ready` false and waits
+     * on `_cv_tp_users` for the count to reach zero before it frees anything,
+     * which keeps issue 0899's guarantee. Guarded by `_mutex_tp_users`, a plain
+     * mutex the wait RELEASES, so a sender can always get back in to leave. */
+    _z_mutex_t _mutex_tp_users;
+    _z_condvar_t _cv_tp_users;
+    size_t _tp_users;
 #if Z_FEATURE_ADMIN_SPACE == 1
     _z_mutex_t _mutex_admin_space;
 #endif
@@ -132,9 +142,10 @@ typedef struct _z_session_t {
     _z_transport_t _tp;
     /* nano-ros issue 0899 -- `_tp` is open and a send may enter it. Cleared
      * before a teardown frees the transport, set when `_z_open` succeeds. A
-     * send reads it before taking `_mutex_transport`, so during an outage it
-     * fails at once instead of waiting for the reconnect, which holds that
-     * mutex across a blocking `_z_open`. */
+     * send tests it to take a use (issue 2596: under `_mutex_tp_users`, never
+     * `_mutex_transport`), so during an outage it fails at once instead of
+     * waiting for the reconnect, which holds `_mutex_transport` across a
+     * blocking `_z_open`. */
     _z_atomic_bool_t _tp_ready;
     /* nano-ros issue 2389 -- how many times the read task closed this
      * session's transport because a write on its stream link failed (the peer

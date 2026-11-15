@@ -72,9 +72,26 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
         _z_mutex_drop(&zn->_mutex_inner);
         _Z_ERROR_RETURN(ret);
     }
+    // nano-ros issue 2596 -- the transport use count.
+    ret = _z_mutex_init(&zn->_mutex_tp_users);
+    if (ret == _Z_RES_OK) {
+        ret = _z_condvar_init(&zn->_cv_tp_users);
+        if (ret != _Z_RES_OK) {
+            _z_mutex_drop(&zn->_mutex_tp_users);
+        }
+    }
+    if (ret != _Z_RES_OK) {
+        _z_mutex_rec_drop(&zn->_mutex_transport);
+        _z_mutex_drop(&zn->_mutex_last_timestamp);
+        _z_mutex_drop(&zn->_mutex_inner);
+        _Z_ERROR_RETURN(ret);
+    }
+    zn->_tp_users = 0;
 #if Z_FEATURE_ADMIN_SPACE == 1
     ret = _z_mutex_init(&zn->_mutex_admin_space);
     if (ret != _Z_RES_OK) {
+        _z_condvar_drop(&zn->_cv_tp_users);
+        _z_mutex_drop(&zn->_mutex_tp_users);
         _z_mutex_rec_drop(&zn->_mutex_transport);
         _z_mutex_drop(&zn->_mutex_inner);
         _Z_ERROR_RETURN(ret);
@@ -159,6 +176,8 @@ z_result_t _z_session_init(_z_session_t *zn, const _z_id_t *zid) {
 #if Z_FEATURE_ADMIN_SPACE == 1
         _z_mutex_drop(&zn->_mutex_admin_space);
 #endif
+        _z_condvar_drop(&zn->_cv_tp_users);
+        _z_mutex_drop(&zn->_mutex_tp_users);
         _z_mutex_rec_drop(&zn->_mutex_transport);
         _z_mutex_drop(&zn->_mutex_last_timestamp);
         _z_mutex_drop(&zn->_mutex_inner);
@@ -238,8 +257,55 @@ z_result_t _z_session_close(_z_session_t *zn) {
     return _Z_RES_OK;
 }
 
+z_result_t _z_session_transport_use_begin(_z_session_t *zn) {
+    // Fast path for an outage: no lock at all while the reconnect runs.
+    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
+        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
+#if Z_FEATURE_MULTI_THREAD == 1
+    // The test and the increment are one step under `_mutex_tp_users`, the
+    // lock a teardown clears `_tp_ready` under, so a send can never take a
+    // use after a teardown has decided it is waiting for none.
+    _z_mutex_lock(&zn->_mutex_tp_users);
+    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
+        _z_mutex_unlock(&zn->_mutex_tp_users);
+        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
+    zn->_tp_users++;
+    _z_mutex_unlock(&zn->_mutex_tp_users);
+#endif
+    return _Z_RES_OK;
+}
+
+void _z_session_transport_use_end(_z_session_t *zn) {
+#if Z_FEATURE_MULTI_THREAD == 1
+    _z_mutex_lock(&zn->_mutex_tp_users);
+    zn->_tp_users--;
+    if (zn->_tp_users == 0) {
+        _z_condvar_signal_all(&zn->_cv_tp_users);
+    }
+    _z_mutex_unlock(&zn->_mutex_tp_users);
+#else
+    _ZP_UNUSED(zn);
+#endif
+}
+
 void _z_session_transport_teardown(_z_session_t *zn) {
+#if Z_FEATURE_MULTI_THREAD == 1
+    // nano-ros issue 2596 -- no new use from here on, then wait out the ones
+    // inside. The condvar wait releases `_mutex_tp_users` (never
+    // `_mutex_transport`, which a send no longer needs), so every sender can
+    // get back in to leave. The wait is a loop: `_z_condvar_wait` may wake
+    // spuriously (the platform shim bounds each wait, issue 1196).
+    _z_mutex_lock(&zn->_mutex_tp_users);
     _z_atomic_bool_store(&zn->_tp_ready, false, _z_memory_order_release);
+    while (zn->_tp_users > 0) {
+        _z_condvar_wait(&zn->_cv_tp_users, &zn->_mutex_tp_users);
+    }
+    _z_mutex_unlock(&zn->_mutex_tp_users);
+#else
+    _z_atomic_bool_store(&zn->_tp_ready, false, _z_memory_order_release);
+#endif
     _z_transport_clear(&zn->_tp);
 }
 
@@ -255,6 +321,8 @@ void _z_session_clear(_z_session_t *zn) {
 #if Z_FEATURE_ADMIN_SPACE == 1
     _z_mutex_drop(&zn->_mutex_admin_space);
 #endif
+    _z_condvar_drop(&zn->_cv_tp_users);
+    _z_mutex_drop(&zn->_mutex_tp_users);
     _z_mutex_rec_drop(&zn->_mutex_transport);
     _z_mutex_drop(&zn->_mutex_last_timestamp);
     _z_mutex_drop(&zn->_mutex_inner);

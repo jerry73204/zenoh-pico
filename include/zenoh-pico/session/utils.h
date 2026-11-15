@@ -92,9 +92,23 @@ static inline void _z_session_admin_space_mutex_unlock(_z_session_t *zn) { _ZP_U
 #endif
 
 /* nano-ros issue 0899 -- the one way to tear `zn->_tp` down while sends may
- * be running: mark it not ready, then clear it. Call with `_mutex_transport`
- * held, so no send that saw it ready is still inside. */
+ * be running: mark it not ready, wait until no send is still inside it (issue
+ * 2596: the use count below), then clear it. Call with `_mutex_transport`
+ * held, which keeps the other holders of that lock (the declaration cache,
+ * the reconnect) out, and with neither the tx nor the link mutex held: a send
+ * that is inside the transport may need them to finish.
+ *
+ * A send whose link write never returns keeps its use for ever, so this waits
+ * for ever. That is no regression: before issue 2596 the same send held
+ * `_mutex_transport`, and the teardown waited for ever to take it. */
 void _z_session_transport_teardown(_z_session_t *zn);
+
+/* nano-ros issue 2596 -- enter and leave `zn->_tp` for one send. `use_begin`
+ * fails with `_Z_ERR_TRANSPORT_NOT_AVAILABLE` when the transport is not ready
+ * (an outage, a teardown in progress), and the caller must not touch `_tp`;
+ * on success the caller must call `use_end` exactly once. */
+z_result_t _z_session_transport_use_begin(_z_session_t *zn);
+void _z_session_transport_use_end(_z_session_t *zn);
 
 #ifdef __cplusplus
 }

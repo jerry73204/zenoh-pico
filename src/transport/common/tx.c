@@ -665,30 +665,18 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
     }
 #endif
     z_result_t ret = _Z_RES_OK;
-    /* nano-ros issue 0899 — hold the session's transport lifetime lock for the
-     * whole send. Everything below dereferences resources `_zp_unicast_failed`
-     * frees from the lease task; without it a publisher can be inside a
-     * transport that is being torn down under it. Uncontended in steady state:
-     * one recursive take per message, and the only other holder is a teardown,
-     * which is not a steady state.
-     *
-     * The lock must be the SESSION's — the transport cannot guard its own
-     * lifetime — which is why these two entry points take a `_z_session_t *`
-     * and `_z_send_t_msg` (a `_z_transport_t *`) does not: its callers are the
-     * lease and read tasks, and the teardown joins the read task before it
-     * frees anything. */
-    /* nano-ros issue 0899 -- an outage fails a send at once. The reconnect
-     * holds `_mutex_transport` across a blocking `_z_open` (up to
-     * Z_TRANSPORT_CONNECT_TIMEOUT, retried every second), so a send that took
-     * the lock first would wait out the whole outage. Checked again under the
-     * lock: a teardown may have run while this one waited for it. */
-    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
-        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
-    }
-    _z_session_transport_mutex_lock(zn);
-    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
-        _z_session_transport_mutex_unlock(zn);
-        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    /* nano-ros issue 0899 -- the send dereferences resources a teardown
+     * (`_zp_unicast_failed`, the reconnect) frees, so it holds the transport
+     * alive for its whole duration. Issue 2596 -- it holds a USE of the
+     * transport, not `_mutex_transport`: the exclusive hold serialised every
+     * send behind a slow link write, which made TX_SPLIT_LOCK's detached batch
+     * write stall the publishers it existed to free. A teardown now waits for
+     * the uses to drain (`_z_session_transport_teardown`). An outage still
+     * fails a send at once: `use_begin` refuses while `_tp_ready` is false,
+     * without waiting for the reconnect that holds `_mutex_transport`. */
+    ret = _z_session_transport_use_begin(zn);
+    if (ret != _Z_RES_OK) {
+        return ret;
     }
     // Call transport function
     switch (zn->_tp._type) {
@@ -731,36 +719,24 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
             ret = _Z_ERR_TRANSPORT_NOT_AVAILABLE;
             break;
     }
-    _z_session_transport_mutex_unlock(zn);
+    _z_session_transport_use_end(zn);
     return ret;
 }
 
 z_result_t _z_send_n_batch(_z_session_t *zn, z_congestion_control_t cong_ctrl) {
     z_result_t ret = _Z_RES_OK;
-    /* nano-ros issue 0899 — hold the session's transport lifetime lock for the
-     * whole send. Everything below dereferences resources `_zp_unicast_failed`
-     * frees from the lease task; without it a publisher can be inside a
-     * transport that is being torn down under it. Uncontended in steady state:
-     * one recursive take per message, and the only other holder is a teardown,
-     * which is not a steady state.
-     *
-     * The lock must be the SESSION's — the transport cannot guard its own
-     * lifetime — which is why these two entry points take a `_z_session_t *`
-     * and `_z_send_t_msg` (a `_z_transport_t *`) does not: its callers are the
-     * lease and read tasks, and the teardown joins the read task before it
-     * frees anything. */
-    /* nano-ros issue 0899 -- an outage fails a send at once. The reconnect
-     * holds `_mutex_transport` across a blocking `_z_open` (up to
-     * Z_TRANSPORT_CONNECT_TIMEOUT, retried every second), so a send that took
-     * the lock first would wait out the whole outage. Checked again under the
-     * lock: a teardown may have run while this one waited for it. */
-    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
-        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
-    }
-    _z_session_transport_mutex_lock(zn);
-    if (!_z_atomic_bool_load(&zn->_tp_ready, _z_memory_order_acquire)) {
-        _z_session_transport_mutex_unlock(zn);
-        return _Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    /* nano-ros issue 0899 -- the send dereferences resources a teardown
+     * (`_zp_unicast_failed`, the reconnect) frees, so it holds the transport
+     * alive for its whole duration. Issue 2596 -- it holds a USE of the
+     * transport, not `_mutex_transport`: the exclusive hold serialised every
+     * send behind a slow link write, which made TX_SPLIT_LOCK's detached batch
+     * write stall the publishers it existed to free. A teardown now waits for
+     * the uses to drain (`_z_session_transport_teardown`). An outage still
+     * fails a send at once: `use_begin` refuses while `_tp_ready` is false,
+     * without waiting for the reconnect that holds `_mutex_transport`. */
+    ret = _z_session_transport_use_begin(zn);
+    if (ret != _Z_RES_OK) {
+        return ret;
     }
     // Call transport function
     switch (zn->_tp._type) {
@@ -788,6 +764,6 @@ z_result_t _z_send_n_batch(_z_session_t *zn, z_congestion_control_t cong_ctrl) {
             ret = _Z_ERR_TRANSPORT_NOT_AVAILABLE;
             break;
     }
-    _z_session_transport_mutex_unlock(zn);
+    _z_session_transport_use_end(zn);
     return ret;
 }

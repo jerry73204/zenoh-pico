@@ -608,7 +608,9 @@ _z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *execut
      * runs on the executor while application threads declare and undeclare;
      * unlocked, a prune freed the node being encoded here (measured on the
      * 1.8.0 line: heap-use-after-free in `_z_declare_encode` under the
-     * replay). Each send below takes the same recursive lock again. */
+     * replay). The sends below take a transport use, not this lock (issue
+     * 2596); a failed one tears down under it, which waits for every other
+     * send to leave the transport. */
     _z_session_transport_mutex_lock(s);
     if (!_z_network_message_slist_is_empty(s->_declaration_cache)) {
         _z_network_message_slist_t *iter = s->_declaration_cache;
@@ -642,10 +644,10 @@ _z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *execut
  *
  * Why that lock and not a new one: every caller of `_z_cache_declaration` and
  * `_z_prune_declaration` has JUST returned from `_z_send_n_msg` in the same
- * frame, and `_z_send_n_msg` takes `_mutex_transport`. So whatever a caller
- * holds, it already takes this lock under it; taking it again here adds no
- * lock-order edge that did not exist. `_z_reopen`'s replay holds it across the
- * walk and its sends, which take it recursively. */
+ * frame, and `_z_send_n_msg` took `_mutex_transport` until issue 2596 (it now
+ * takes a transport use, under `_mutex_tp_users`, which is a leaf: nothing is
+ * locked while it is held). So this lock adds no edge a caller did not already
+ * have. `_z_reopen`'s replay holds it across the walk and its sends. */
 void _z_cache_declaration(_z_session_t *zs, const _z_network_message_t *n_msg) {
     if (_z_config_is_empty(&zs->_config)) {
         return;
