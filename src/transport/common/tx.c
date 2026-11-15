@@ -72,6 +72,9 @@ static _z_zint_t _z_transport_tx_get_sn(_z_transport_common_t *ztc, z_reliabilit
 }
 
 #if Z_FEATURE_FRAGMENTATION == 1
+static z_result_t _z_transport_tx_drain_pending_spare_locked(_z_transport_common_t *ztc,
+                                                             _z_transport_peer_unicast_slist_t *peers);
+
 static z_result_t _z_transport_tx_send_fragment_inner(_z_transport_common_t *ztc, _z_wbuf_t *frag_buff,
                                                       const _z_network_message_t *n_msg, z_reliability_t reliability,
                                                       _z_zint_t first_sn, _z_transport_peer_unicast_slist_t *peers) {
@@ -116,8 +119,23 @@ static z_result_t _z_transport_tx_send_fragment(_z_transport_common_t *ztc, cons
                                                 _z_transport_peer_unicast_slist_t *peers) {
     // Create an expandable wbuf for fragmentation
     _z_wbuf_t frag_buff = _z_wbuf_make(_Z_FRAG_BUFF_BASE_SIZE, true);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+    // nano-ros issue 2575 — under split lock every link write holds the link
+    // mutex, the fragments included. A batch the overflow path just parked in
+    // the spare carries OLDER sequence numbers than these fragments (it is the
+    // batch this message overflowed), so it ships first, under the same hold:
+    // the fragments used to go out ahead of it, and a reliable receiver saw
+    // its sequence numbers out of order.
+    _z_transport_link_tx_lock(ztc);
+    z_result_t ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+    if (ret == _Z_RES_OK) {
+        ret = _z_transport_tx_send_fragment_inner(ztc, &frag_buff, n_msg, reliability, first_sn, peers);
+    }
+    _z_transport_link_tx_unlock(ztc);
+#else
     // Send message as fragments
     z_result_t ret = _z_transport_tx_send_fragment_inner(ztc, &frag_buff, n_msg, reliability, first_sn, peers);
+#endif
     // Clear the buffer as it's no longer required
     _z_wbuf_clear(&frag_buff);
     return ret;
