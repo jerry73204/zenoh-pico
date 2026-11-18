@@ -37,8 +37,8 @@
 #if Z_FEATURE_LINK_SERIAL == 1
 #include "zenoh-pico/link/config/serial.h"
 #endif
-#if Z_FEATURE_LINK_IVC == 1
-#include "zenoh-pico/link/config/ivc.h"
+#if Z_FEATURE_LINK_IVC == 1 || Z_FEATURE_LINK_RPMSG == 1
+#include "zenoh-pico/link/config/framed.h"
 #endif
 #if Z_FEATURE_LINK_CAN == 1
 #include "zenoh-pico/link/config/can.h"
@@ -442,7 +442,13 @@ z_result_t _z_endpoint_config_from_string(_z_str_intmap_t *strint, const _z_stri
 #if Z_FEATURE_LINK_IVC == 1
         cmp_str = _z_string_alias_str(IVC_SCHEMA);
         if (_z_string_equals(proto, &cmp_str)) {
-            return _z_ivc_config_from_strn(strint, p_start, cfg_size);
+            return _z_framed_config_from_strn(strint, p_start, cfg_size);
+        }
+#endif
+#if Z_FEATURE_LINK_RPMSG == 1
+        cmp_str = _z_string_alias_str(RPMSG_SCHEMA);
+        if (_z_string_equals(proto, &cmp_str)) {
+            return _z_framed_config_from_strn(strint, p_start, cfg_size);
         }
 #endif
 #if Z_FEATURE_LINK_CAN == 1
@@ -513,7 +519,13 @@ size_t _z_endpoint_config_strlen(const _z_str_intmap_t *s, _z_string_t *proto) {
 #if Z_FEATURE_LINK_IVC == 1
     cmp_str = _z_string_alias_str(IVC_SCHEMA);
     if (_z_string_equals(proto, &cmp_str)) {
-        return _z_ivc_config_strlen(s);
+        return _z_framed_config_strlen(s);
+    }
+#endif
+#if Z_FEATURE_LINK_RPMSG == 1
+    cmp_str = _z_string_alias_str(RPMSG_SCHEMA);
+    if (_z_string_equals(proto, &cmp_str)) {
+        return _z_framed_config_strlen(s);
     }
 #endif
 #if Z_FEATURE_LINK_CAN == 1
@@ -584,7 +596,13 @@ char *_z_endpoint_config_to_string(const _z_str_intmap_t *s, const _z_string_t *
 #if Z_FEATURE_LINK_IVC == 1
     cmp_str = _z_string_alias_str(IVC_SCHEMA);
     if (_z_string_equals(proto, &cmp_str)) {
-        return _z_ivc_config_to_str(s);
+        return _z_framed_config_to_str(s);
+    }
+#endif
+#if Z_FEATURE_LINK_RPMSG == 1
+    cmp_str = _z_string_alias_str(RPMSG_SCHEMA);
+    if (_z_string_equals(proto, &cmp_str)) {
+        return _z_framed_config_to_str(s);
     }
 #endif
 #if Z_FEATURE_LINK_CAN == 1

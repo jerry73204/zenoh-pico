@@ -126,6 +126,9 @@
 #ifndef Z_FEATURE_LINK_SERIAL_USB
 #define Z_FEATURE_LINK_SERIAL_USB 0
 #endif
+#ifndef Z_FEATURE_LINK_RPMSG
+#define Z_FEATURE_LINK_RPMSG 0
+#endif
 #ifndef Z_FEATURE_LINK_IVC
 #define Z_FEATURE_LINK_IVC 0
 #endif

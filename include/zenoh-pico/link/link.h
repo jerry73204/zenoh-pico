@@ -35,6 +35,10 @@
 #include "zenoh-pico/link/transport/ivc.h"
 #endif
 
+#if Z_FEATURE_LINK_RPMSG == 1
+#include "zenoh-pico/link/transport/rpmsg.h"
+#endif
+
 #if Z_FEATURE_LINK_CAN == 1
 #include "zenoh-pico/link/transport/can.h"
 #endif
@@ -137,6 +141,7 @@ enum _z_link_type_e {
     _Z_LINK_TYPE_TLS,
     _Z_LINK_TYPE_RAWETH,
     _Z_LINK_TYPE_IVC,     // Phase 100.4 — NVIDIA Tegra IVC
+    _Z_LINK_TYPE_RPMSG,   // nano-ros — RPMsg between cores of one SoC
     _Z_LINK_TYPE_CAN,     // RFC-0080 — CAN / CAN FD
     _Z_LINK_TYPE_ISOTP,   // RFC-0083 — CAN unicast over ISO-TP
     _Z_LINK_TYPE_CUSTOM,  // nros: Phase 115.B — runtime-pluggable user transport
@@ -158,8 +163,8 @@ typedef struct _z_link_t {
 #if Z_FEATURE_LINK_SERIAL == 1
         _z_serial_socket_t _serial;
 #endif
-#if Z_FEATURE_LINK_IVC == 1
-        _z_ivc_socket_t _ivc;
+#if Z_FEATURE_LINK_IVC == 1 || Z_FEATURE_LINK_RPMSG == 1
+        _z_framed_socket_t _framed;  // IVC and RPMsg (`framed.c`)
 #endif
 #if Z_FEATURE_LINK_ISOTP == 1
         _z_isotp_socket_t _isotp;

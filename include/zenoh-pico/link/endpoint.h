@@ -41,6 +41,9 @@ extern "C" {
 #if Z_FEATURE_LINK_IVC == 1
 #define IVC_SCHEMA "ivc"
 #endif
+#if Z_FEATURE_LINK_RPMSG == 1
+#define RPMSG_SCHEMA "rpmsg"
+#endif
 #if Z_FEATURE_LINK_WS == 1
 #define WS_SCHEMA "ws"
 #endif

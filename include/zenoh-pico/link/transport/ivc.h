@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "zenoh-pico/config.h"
+#include "zenoh-pico/link/transport/framed.h"
 #include "zenoh-pico/system/platform.h"
 
 #ifdef __cplusplus
@@ -36,38 +37,12 @@ extern "C" {
 // without changing the framing protocol — the wire format already
 // supports anything ≤ 65 535. See
 // `docs/roadmap/phase-100-04-link-ivc-design.md` §5.2.
-#define _Z_IVC_MTU_SIZE 2048
-
-// Per-frame framing header — keep in sync with §5.2 of the IVC link
-// design doc. Used by both ends of the link (this library and the
-// CCPLEX-side `autoware_sentinel/src/ivc-bridge/` daemon).
-#define _Z_IVC_FRAME_HEADER_SIZE 4  // total_len (u16 LE) + offset (u16 LE)
-
-// IVC frame size as advertised by the driver. NVIDIA's default carveout
-// uses 64 bytes; we cache the actual value at open time and never
-// re-query (design doc §8.2).
-//
-// 64 is the worst case the link layer is sized for — `_z_ivc_socket_t`
-// stores its scratch frame buffer as `_Z_IVC_FRAME_MAX`, and oversized
-// frames are rejected at open as "unsupported channel". 1024 covers
-// every NVIDIA Tegra IVC profile we know about.
-#define _Z_IVC_FRAME_MAX 1024
-
-typedef struct {
-    // Opaque IVC channel handle returned by `_z_open_ivc(channel_id)`.
-    // Lifetime: equal to the program; the FSP / unix-mock owns the
-    // underlying state and `_z_close_ivc` is a no-op.
-    void *_ch;
-
-    // Frame size negotiated for this channel, captured once at open.
-    uint16_t _frame_size;
-
-    // Reassembly state — see design doc §5.4. `_expected_total == 0`
-    // means "no batch in progress; next frame starts a fresh batch".
-    uint16_t _expected_total;
-    uint16_t _bytes_received;
-    uint8_t _rx_buf[_Z_IVC_MTU_SIZE];
-} _z_ivc_socket_t;
+// The framing is the framed links' (`transport/framed.h`); these names stay
+// for the IVC backend and its bridge daemons.
+#define _Z_IVC_MTU_SIZE _Z_FRAMED_MTU_SIZE
+#define _Z_IVC_FRAME_HEADER_SIZE _Z_FRAMED_HEADER_SIZE
+#define _Z_IVC_FRAME_MAX _Z_FRAMED_FRAME_MAX
+typedef _z_framed_socket_t _z_ivc_socket_t;
 
 // =============================================================================
 // C ABI provided by zpico-platform-shim::ivc_helpers

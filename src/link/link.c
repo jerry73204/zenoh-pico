@@ -77,6 +77,11 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
             ret = _z_new_link_ivc(zl, ep);
         } else
 #endif
+#if Z_FEATURE_LINK_RPMSG == 1
+            if (_z_endpoint_rpmsg_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_rpmsg(zl, ep);
+        } else
+#endif
 #if Z_FEATURE_LINK_ISOTP == 1
             // CONNECT SIDE ONLY, deliberately. An ISO-TP peer dials out and is
             // never registered in _z_listen_link, so it never reaches
@@ -160,6 +165,11 @@ z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_co
 #if Z_FEATURE_LINK_IVC == 1
             if (_z_endpoint_ivc_valid(&ep) == _Z_RES_OK) {
             ret = _z_new_link_ivc(zl, ep);
+        } else
+#endif
+#if Z_FEATURE_LINK_RPMSG == 1
+            if (_z_endpoint_rpmsg_valid(&ep) == _Z_RES_OK) {
+            ret = _z_new_link_rpmsg(zl, ep);
         } else
 #endif
 #if Z_FEATURE_LINK_CAN == 1
@@ -329,6 +339,11 @@ const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link) {
             // documented contract for "no FD to wait on" — callers
             // either fall back to the link's _read_socket_f or skip
             // the FD path entirely.
+            return NULL;
+#endif
+#if Z_FEATURE_LINK_RPMSG == 1
+        case _Z_LINK_TYPE_RPMSG:
+            // Like IVC: no socket, the link reads through its own callbacks.
             return NULL;
 #endif
 #if Z_FEATURE_LINK_ISOTP == 1

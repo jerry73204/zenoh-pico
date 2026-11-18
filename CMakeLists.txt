@@ -335,6 +335,7 @@ set(Z_FEATURE_LINK_WS 0 CACHE STRING "Toggle WebSocket links")
 set(Z_FEATURE_LINK_SERIAL 0 CACHE STRING "Toggle Serial links")
 set(Z_FEATURE_LINK_SERIAL_USB 0 CACHE STRING "Toggle Serial USB links")
 set(Z_FEATURE_LINK_IVC 0 CACHE STRING "Toggle NVIDIA Tegra IVC links (Phase 100.4)")
+set(Z_FEATURE_LINK_RPMSG 0 CACHE STRING "Toggle RPMsg links between cores of one SoC (nano-ros)")
 set(Z_FEATURE_LINK_CAN 0 CACHE STRING "Toggle CAN / CAN FD links (RFC-0080)")
 set(Z_FEATURE_LINK_ISOTP 0 CACHE STRING "Toggle CAN unicast over ISO-TP (RFC-0083)")
 # On unix the link can run on the KERNEL's CAN_ISOTP socket (0, the default) or
