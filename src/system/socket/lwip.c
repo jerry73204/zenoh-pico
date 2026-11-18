@@ -17,7 +17,6 @@
 #if defined(ZP_PLATFORM_SOCKET_LWIP)
 
 #if defined(ZP_PLATFORM_SOCKET_LINKS_ENABLED)
-#include <unistd.h>
 
 #include "lwip/sockets.h"
 #include "zenoh-pico/link/transport/lwip_socket.h"

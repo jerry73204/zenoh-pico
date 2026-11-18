@@ -19,7 +19,6 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "lwip/ip4_addr.h"
 #include "lwip/netdb.h"
