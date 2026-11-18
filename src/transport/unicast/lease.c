@@ -160,8 +160,10 @@ _z_fut_fn_result_t _zp_unicast_lease_task_fn(void *ztu_arg, _z_executor_t *execu
     }
 
     z_whatami_t mode = _z_transport_common_get_session(&ztu->_common)->_mode;
+    // nano-ros (RFC-0134 D2): one remote end, leased the way client mode is.
+    bool point_to_point = _z_transport_unicast_is_point_to_point(ztu, mode);
 
-    if (mode == Z_WHATAMI_CLIENT) {
+    if (point_to_point) {
         _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(ztu->_peers);
         assert(curr_peer != NULL);
         // The router's silence is measured against the lease IT announced,
@@ -179,7 +181,7 @@ _z_fut_fn_result_t _zp_unicast_lease_task_fn(void *ztu_arg, _z_executor_t *execu
     }
 // TODO: Should we have a task per peer ?
 #if Z_FEATURE_UNICAST_PEER == 1
-    if (mode == Z_WHATAMI_PEER) {
+    if ((mode == Z_WHATAMI_PEER) && !point_to_point) {
         _z_transport_peer_unicast_slist_t *dropped_peers = _z_transport_peer_unicast_slist_new();
         _z_transport_peer_mutex_lock(&ztu->_common);
         // Each peer against its own lease (issue 1731).
@@ -214,7 +216,9 @@ _z_fut_fn_result_t _zp_unicast_keep_alive_task_fn(void *ztu_arg, _z_executor_t *
     }
 
     z_whatami_t mode = _z_transport_common_get_session(&ztu->_common)->_mode;
-    if (mode == Z_WHATAMI_CLIENT) {
+    // nano-ros (RFC-0134 D2): one remote end, kept alive the way client mode is.
+    bool point_to_point = _z_transport_unicast_is_point_to_point(ztu, mode);
+    if (point_to_point) {
         assert(_z_transport_peer_unicast_slist_value(ztu->_peers) != NULL);
         if (!ztu->_common._transmitted) {
             if (_zp_unicast_send_keep_alive(ztu) < 0) {
@@ -229,7 +233,7 @@ _z_fut_fn_result_t _zp_unicast_keep_alive_task_fn(void *ztu_arg, _z_executor_t *
     }
 // TODO: Should we have a task per peer ?
 #if Z_FEATURE_UNICAST_PEER == 1
-    if (mode == Z_WHATAMI_PEER) {
+    if ((mode == Z_WHATAMI_PEER) && !point_to_point) {
         if (!ztu->_common._transmitted) {
             _Z_DEBUG("Sending keep alive");
             // Send keep alive to all peers

@@ -682,7 +682,8 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE: {
             _z_transport_common_t *ztc = &zn->_tp._transport._unicast._common;
-            if (zn->_mode == Z_WHATAMI_CLIENT) {
+            // nano-ros (RFC-0134 D2): one remote end, written through the link.
+            if (_z_transport_unicast_is_point_to_point(&zn->_tp._transport._unicast, zn->_mode)) {
                 ret = _z_transport_tx_send_n_msg(ztc, z_msg, reliability, cong_ctrl, NULL);
             } else if (!_z_transport_peer_unicast_slist_is_empty(zn->_tp._transport._unicast._peers)) {
                 if (!_z_transport_batch_hold_peer_mutex()) {
@@ -741,7 +742,8 @@ z_result_t _z_send_n_batch(_z_session_t *zn, z_congestion_control_t cong_ctrl) {
     // Call transport function
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE:
-            if (zn->_mode == Z_WHATAMI_CLIENT) {
+            // nano-ros (RFC-0134 D2): one remote end, written through the link.
+            if (_z_transport_unicast_is_point_to_point(&zn->_tp._transport._unicast, zn->_mode)) {
                 ret = _z_transport_tx_send_n_batch(&zn->_tp._transport._unicast._common, cong_ctrl, NULL);
             } else if (!_z_transport_peer_unicast_slist_is_empty(zn->_tp._transport._unicast._peers)) {
                 _z_transport_peer_mutex_lock(&zn->_tp._transport._unicast._common);

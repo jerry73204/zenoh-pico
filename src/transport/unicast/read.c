@@ -456,7 +456,9 @@ _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *execut
     }
 
     z_whatami_t mode = _z_transport_common_get_session(&ztu->_common)->_mode;
-    if (mode == Z_WHATAMI_CLIENT) {
+    // nano-ros (RFC-0134 D2): one remote end, read through the link.
+    bool point_to_point = _z_transport_unicast_is_point_to_point(ztu, mode);
+    if (point_to_point) {
         _z_transport_peer_unicast_t *curr_peer = _z_transport_peer_unicast_slist_value(ztu->_peers);
         assert(curr_peer != NULL);
         // nano-ros issue 2389 -- a write on the link failed: the router stopped
@@ -495,7 +497,7 @@ _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *execut
 #endif
     }
 #if Z_FEATURE_UNICAST_PEER == 1
-    if (mode == Z_WHATAMI_PEER) {
+    if ((mode == Z_WHATAMI_PEER) && !point_to_point) {
         bool has_peers = !_z_transport_peer_unicast_slist_is_empty(ztu->_peers);
         if (!has_peers) {
             return _z_fut_fn_result_wake_up_after(100);

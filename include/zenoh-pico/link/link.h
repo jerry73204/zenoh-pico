@@ -92,14 +92,18 @@ typedef enum {
  *         can carry at all (a CAN frame), not a size this implementation chose
  *         (UDP's 1450). Only then does the MTU bound the batch size a multicast
  *         JOIN advertises -- see _z_multicast_join_batch_size().
- *     reserved: 3 bits, reserved for future use
+ *     single_peer: 1 bit, 1 if the link joins exactly two endpoints (IVC,
+ *         serial, RPMsg), so a peer-mode session on it has one remote end and
+ *         no accept loop (nano-ros, RFC-0134 D2).
+ *     reserved: 2 bits, reserved for future use
  */
 typedef struct _z_link_capabilities_t {
     uint8_t _transport : 2;
     uint8_t _flow : 1;
     uint8_t _is_reliable : 1;
     uint8_t _mtu_is_frame_ceiling : 1;
-    uint8_t _reserved : 3;
+    uint8_t _is_single_peer : 1;
+    uint8_t _reserved : 2;
 } _z_link_capabilities_t;
 
 struct _z_link_t;  // Forward declaration to be used in _z_f_link_*
@@ -216,9 +220,10 @@ size_t _z_link_recv_exact_zbuf(const _z_link_t *zl, _z_zbuf_t *zbf, size_t len, 
 size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_sys_net_socket_t socket);
 const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link);
 /*
- * nano-ros -- the socket a peer entry records for a link's one remote end: a
- * copy of the link's own socket, or an all-zero socket for a link that has
- * none (IVC). `*_z_link_get_socket(zl)` dereferenced NULL for those links.
+ * nano-ros (RFC-0134 D2) -- the socket a peer entry records for a link's one
+ * remote end: a copy of the link's own socket, or an all-zero socket for a link
+ * that has none (IVC, CAN, custom). `*_z_link_get_socket(zl)` dereferenced NULL
+ * for those links.
  */
 _z_sys_net_socket_t _z_link_peer_socket(const _z_link_t *link);
 

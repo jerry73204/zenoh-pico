@@ -67,6 +67,7 @@ z_result_t _z_new_link_serial(_z_link_t *zl, _z_endpoint_t endpoint) {
     zl->_cap._transport = Z_LINK_CAP_TRANSPORT_UNICAST;
     zl->_cap._flow = Z_LINK_CAP_FLOW_DATAGRAM;
     zl->_cap._is_reliable = false;
+    zl->_cap._is_single_peer = true;  // nano-ros, RFC-0134 D2: one line, two ends
 
     zl->_mtu = _z_get_link_mtu_serial();
 

@@ -150,6 +150,28 @@ static z_result_t _z_new_transport_peer(_z_transport_t *zt, const _z_string_t *l
                 _z_link_free(&zl);
                 return ret;
             }
+            if (zl->_cap._is_single_peer) {
+                // nano-ros (RFC-0134 D2) -- a link that joins two endpoints has
+                // exactly one remote end, so there is no second peer to accept
+                // and no socket to wait on. The listening end runs the acceptor
+                // half of the handshake once, on the link itself; a remote that
+                // has not connected yet fails this attempt as an open failure,
+                // which `_z_open_bind_listener` retries until its timeout, and a
+                // lease expiry later re-enters it through the reopen task.
+                if (peer_op != _Z_PEER_OP_OPEN) {
+                    ret = _z_unicast_handshake_listen(&tp_param, zl, local_zid, Z_WHATAMI_PEER, NULL);
+                    if (ret != _Z_RES_OK) {
+                        _z_link_free(&zl);
+                        return _Z_ERR_TRANSPORT_OPEN_FAILED;
+                    }
+                }
+                ret = _z_unicast_transport_create(zt, zl, &tp_param);
+                if (ret == _Z_RES_OK) {
+                    ret = _z_transport_peer_unicast_add(&zt->_transport._unicast, &tp_param, _z_link_peer_socket(zl),
+                                                        false, NULL);
+                }
+                break;
+            }
             ret = _z_unicast_transport_create(zt, zl, &tp_param);
             _Z_SET_IF_OK(ret, _z_socket_set_blocking(_z_link_get_socket(zl), false));
             if (ret == _Z_RES_OK) {

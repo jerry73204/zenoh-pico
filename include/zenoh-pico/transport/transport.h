@@ -278,6 +278,16 @@ typedef struct {
     _z_zint_t _lease_slept_ms;
 } _z_transport_unicast_t;
 
+/*
+ * nano-ros (RFC-0134 D2) -- whether a unicast transport has exactly one remote
+ * end: client mode (the router), or peer mode on a link that joins two
+ * endpoints. Such a transport reads, writes and leases its one remote end the
+ * way client mode does, through the link rather than through a per-peer socket.
+ */
+static inline bool _z_transport_unicast_is_point_to_point(const _z_transport_unicast_t *ztu, z_whatami_t mode) {
+    return (mode == Z_WHATAMI_CLIENT) || ((ztu->_common._link != NULL) && ztu->_common._link->_cap._is_single_peer);
+}
+
 #define _Z_MULTICAST_ADDR_BUFF_SIZE 32  // Arbitrary size that must be able to contain any link address.
 
 typedef struct _z_transport_multicast_t {
