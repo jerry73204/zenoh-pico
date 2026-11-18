@@ -104,7 +104,8 @@ static bool _z_unicast_client_read(_z_transport_unicast_t *ztu, _z_transport_pee
         case Z_LINK_CAP_FLOW_DATAGRAM:
             _z_zbuf_compact(&ztu->_common._zbuf);
             *to_read = _z_link_socket_recv_zbuf(ztu->_common._link, &ztu->_common._zbuf, peer->_socket);
-            if (*to_read == SIZE_MAX) {
+            // nano-ros: 0 is "nothing yet" on a non-blocking datagram link.
+            if ((*to_read == SIZE_MAX) || (*to_read == 0)) {
                 return false;
             }
             break;

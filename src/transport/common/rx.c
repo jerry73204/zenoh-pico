@@ -18,6 +18,7 @@
 
 #include "zenoh-pico/protocol/codec/transport.h"
 #include "zenoh-pico/session/utils.h"
+#include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/transport/multicast/rx.h"
 #include "zenoh-pico/transport/unicast/rx.h"
 #include "zenoh-pico/utils/endianness.h"
@@ -64,11 +65,19 @@ z_result_t _z_link_recv_t_msg_cap_flow_stream(const _z_link_t *zl, _z_zbuf_t *zb
 
 z_result_t _z_link_recv_t_msg_cap_flow_datagram(const _z_link_t *zl, _z_zbuf_t *zbf, _z_sys_net_socket_t *socket) {
     _ZP_UNUSED(socket);
-    if (_z_link_recv_zbuf(zl, zbf, NULL) == SIZE_MAX) {
+    size_t rb = _z_link_recv_zbuf(zl, zbf, NULL);
+    if (rb == SIZE_MAX) {
         return Z_ETIMEDOUT;
-    } else {
-        return _Z_RES_OK;
     }
+    // nano-ros: no datagram is empty, so 0 bytes is "nothing yet", the answer a
+    // non-blocking link (IVC) gives. Taking it as a message failed every
+    // handshake whose reply was not already waiting. Yield and let the caller's
+    // deadline loop try again.
+    if (rb == 0) {
+        z_sleep_ms(1);
+        return Z_ETIMEDOUT;
+    }
+    return _Z_RES_OK;
 }
 
 z_result_t _z_link_recv_t_msg(_z_transport_message_t *t_msg, const _z_link_t *zl, _z_sys_net_socket_t *socket,

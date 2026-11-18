@@ -232,15 +232,15 @@ size_t _z_link_recv_exact_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, size_t len
 }
 
 size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_sys_net_socket_t socket) {
-#if Z_FEATURE_LINK_CUSTOM == 1
-    // nros: custom-link has no FD-shaped socket; the link itself
-    // owns the user vtable. Re-route the recv through `_read_f`
-    // (which receives the link pointer and can therefore reach
-    // `_socket._custom._ops`).
-    if (link->_type == _Z_LINK_TYPE_CUSTOM) {
+    // nano-ros: a link with no socket (custom, IVC, CAN) reads through its own
+    // `_read_f`, which receives the link and so reaches the link's state. The
+    // socket-shaped `_read_socket_f` cannot: IVC's refuses outright, so a
+    // session on IVC never received anything. This generalises the custom-link
+    // reroute to every link `_z_link_get_socket` reports as socket-less.
+    if (_z_link_get_socket(link) == NULL) {
+        _ZP_UNUSED(socket);
         return _z_link_recv_zbuf(link, zbf, NULL);
     }
-#endif
     size_t rb = link->_read_socket_f(socket, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf));
     if (rb != SIZE_MAX) {
         _z_zbuf_set_wpos(zbf, _z_zbuf_get_wpos(zbf) + rb);
