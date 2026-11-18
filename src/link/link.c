@@ -15,6 +15,7 @@
 #include "zenoh-pico/link/link.h"
 
 #include <stddef.h>
+#include <string.h>
 
 #include "zenoh-pico/config.h"
 #include "zenoh-pico/link/config/raweth.h"
@@ -283,6 +284,16 @@ z_result_t _z_link_send_wbuf(const _z_link_t *link, const _z_wbuf_t *wbf, _z_sys
         ((_z_link_t *)link)->_tx_broken = true;
     }
     return ret;
+}
+
+_z_sys_net_socket_t _z_link_peer_socket(const _z_link_t *link) {
+    _z_sys_net_socket_t sock;
+    memset(&sock, 0, sizeof(sock));
+    const _z_sys_net_socket_t *own = _z_link_get_socket(link);
+    if (own != NULL) {
+        sock = *own;
+    }
+    return sock;
 }
 
 const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link) {

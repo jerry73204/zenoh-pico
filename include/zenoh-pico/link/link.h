@@ -215,6 +215,13 @@ size_t _z_link_recv_exact_zbuf(const _z_link_t *zl, _z_zbuf_t *zbf, size_t len, 
                                _z_sys_net_socket_t *socket);
 size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_sys_net_socket_t socket);
 const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link);
+/*
+ * nano-ros -- the socket a peer entry records for a link's one remote end: a
+ * copy of the link's own socket, or an all-zero socket for a link that has
+ * none (IVC). `*_z_link_get_socket(zl)` dereferenced NULL for those links.
+ */
+_z_sys_net_socket_t _z_link_peer_socket(const _z_link_t *link);
+
 
 #ifdef __cplusplus
 }
