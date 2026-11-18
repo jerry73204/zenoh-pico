@@ -19,7 +19,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(Z_FEATURE_NROS_PLATFORM_TIME)
+/* `struct timeval` only (z_time_t); the time itself comes from nano-ros below.
+ * POSIX puts timeval in <sys/select.h>, which newlib and TI Arm Clang's C
+ * library both have; TI's has no <sys/time.h> and no gettimeofday. */
+#include <sys/select.h>
+#include <time.h> /* time_t, localtime */
+#else
 #include <sys/time.h>
+#endif
 
 #if defined(ZENOH_FREERTOS_PLUS_TCP)
 #include "FreeRTOS_IP.h"
@@ -567,9 +575,31 @@ void z_clock_advance_ms(z_clock_t *clock, unsigned long duration) {
 void z_clock_advance_s(z_clock_t *clock, unsigned long duration) { z_clock_advance_ms(clock, duration * 1000); }
 
 /*------------------ Time ------------------*/
+#if defined(Z_FEATURE_NROS_PLATFORM_TIME)
+/* nano-ros (phase-575 W3): the WALL clock is nano-ros's
+ * `nros_platform_time_now_ns()`, never libc's gettimeofday, so the image's C
+ * library needs none (TI Arm Clang's has none). 0 is that function's "no wall
+ * clock", and it passes through: z_timestamp_new still issues increasing
+ * stamps from a constant clock, and a board that has real time selects a wall
+ * source in nano-ros rather than here. The monotonic z_clock_* above stays on
+ * FreeRTOS ticks. */
+extern uint64_t nros_platform_time_now_ns(void);
+
+static z_time_t _z_nros_time_now(void) {
+    const uint64_t ns = nros_platform_time_now_ns();
+    z_time_t t;
+    t.tv_sec = (time_t)(ns / 1000000000ull);
+    t.tv_usec = (long)((ns % 1000000000ull) / 1000ull);
+    return t;
+}
+#define _Z_FREERTOS_TIME_NOW(now) ((now) = _z_nros_time_now())
+#else
+#define _Z_FREERTOS_TIME_NOW(now) gettimeofday(&(now), NULL)
+#endif
+
 z_time_t z_time_now(void) {
     z_time_t now;
-    gettimeofday(&now, NULL);
+    _Z_FREERTOS_TIME_NOW(now);
     return now;
 }
 
@@ -583,7 +613,7 @@ const char *z_time_now_as_str(char *const buf, unsigned long buflen) {
 
 unsigned long z_time_elapsed_us(z_time_t *time) {
     z_time_t now;
-    gettimeofday(&now, NULL);
+    _Z_FREERTOS_TIME_NOW(now);
 
     unsigned long elapsed = (unsigned long)(1000000 * (now.tv_sec - time->tv_sec) + (now.tv_usec - time->tv_usec));
     return elapsed;
@@ -591,7 +621,7 @@ unsigned long z_time_elapsed_us(z_time_t *time) {
 
 unsigned long z_time_elapsed_ms(z_time_t *time) {
     z_time_t now;
-    gettimeofday(&now, NULL);
+    _Z_FREERTOS_TIME_NOW(now);
 
     unsigned long elapsed = (unsigned long)(1000 * (now.tv_sec - time->tv_sec) + (now.tv_usec - time->tv_usec) / 1000);
     return elapsed;
@@ -599,7 +629,7 @@ unsigned long z_time_elapsed_ms(z_time_t *time) {
 
 unsigned long z_time_elapsed_s(z_time_t *time) {
     z_time_t now;
-    gettimeofday(&now, NULL);
+    _Z_FREERTOS_TIME_NOW(now);
 
     unsigned long elapsed = (unsigned long)(now.tv_sec - time->tv_sec);
     return elapsed;
@@ -607,7 +637,7 @@ unsigned long z_time_elapsed_s(z_time_t *time) {
 
 z_result_t _z_get_time_since_epoch(_z_time_since_epoch *t) {
     z_time_t now;
-    gettimeofday(&now, NULL);
+    _Z_FREERTOS_TIME_NOW(now);
     t->secs = (uint32_t)now.tv_sec;
     t->nanos = (uint32_t)now.tv_usec * 1000;
     return _Z_RES_OK;
