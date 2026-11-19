@@ -114,6 +114,7 @@ static const _z_framed_backend_t _z_ivc_backend = {
     .tx_get = _z_ivc_tx_get,
     .tx_commit = _z_ivc_tx_commit_ok,
     .tx_abandon = _z_ivc_tx_abandon,
+    .rx_wait = NULL,
 };
 
 z_result_t _z_f_link_open_ivc(_z_link_t *self) {

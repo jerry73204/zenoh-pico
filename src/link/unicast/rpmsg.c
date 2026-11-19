@@ -45,6 +45,7 @@ static const _z_framed_backend_t _z_rpmsg_backend = {
     .tx_get = _z_rpmsg_tx_get,
     .tx_commit = _z_rpmsg_tx_commit,
     .tx_abandon = _z_rpmsg_tx_abandon,
+    .rx_wait = _z_rpmsg_rx_wait,
 };
 
 static z_result_t _z_f_link_open_rpmsg(_z_link_t *self) {

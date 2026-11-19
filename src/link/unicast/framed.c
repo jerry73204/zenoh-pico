@@ -17,6 +17,7 @@
 
 #include <string.h>
 
+#include "zenoh-pico/system/platform.h"
 #include "zenoh-pico/utils/pointers.h"
 
 #if Z_FEATURE_LINK_IVC == 1 || Z_FEATURE_LINK_RPMSG == 1
@@ -121,6 +122,14 @@ static size_t __z_framed_recv_batch(_z_framed_socket_t *s, uint8_t *dst, size_t 
         size_t n = 0;
         const uint8_t *frame = ops->rx_get(s->_ch, &n);
         if (frame == NULL) {
+            // Nothing waiting: wait for a frame as a socket read would, so
+            // the reading thread yields (see `rx_wait` in framed.h), then
+            // report "nothing yet" and let the caller retry.
+            if (ops->rx_wait != NULL) {
+                (void)ops->rx_wait(s->_ch, Z_CONFIG_SOCKET_TIMEOUT);
+            } else {
+                z_sleep_ms(1);
+            }
             return 0;
         }
         if (n < _Z_FRAMED_HEADER_SIZE) {

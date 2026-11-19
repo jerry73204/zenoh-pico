@@ -42,6 +42,14 @@ extern "C" {
 // `tx_commit` sends it and answers whether it was sent (a channel that copies
 // on send, like RPMsg, can fail there); `rx_get` lends the next received
 // frame until `rx_release`.
+//
+// `rx_wait` is the one call that may block: it returns once a frame may be
+// waiting, or after `timeout_ms`, the way a socket read with a receive
+// timeout does. It may be NULL, and the link then sleeps 1 ms instead. A read
+// that answers at once when nothing is waiting would spin the thread that
+// reads it, and on a single core that starves every task at or below its
+// priority (the zenoh executor reads with no sleep of its own, because on a
+// socket the read itself waits).
 typedef struct {
     void (*close)(void *ch);
     void (*notify)(void *ch);
@@ -51,6 +59,7 @@ typedef struct {
     uint8_t *(*tx_get)(void *ch, size_t *cap_out);
     bool (*tx_commit)(void *ch, size_t len);
     void (*tx_abandon)(void *ch);
+    bool (*rx_wait)(void *ch, uint32_t timeout_ms);
 } _z_framed_backend_t;
 
 typedef struct {

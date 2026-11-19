@@ -40,6 +40,8 @@ void _z_rpmsg_rx_release(void *ch);
 uint8_t *_z_rpmsg_tx_get(void *ch, size_t *cap_out);
 bool _z_rpmsg_tx_commit(void *ch, size_t len);
 void _z_rpmsg_tx_abandon(void *ch);
+// Wait up to `timeout_ms` for a frame (see `rx_wait` in framed.h).
+bool _z_rpmsg_rx_wait(void *ch, uint32_t timeout_ms);
 
 #endif
 
