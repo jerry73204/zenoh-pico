@@ -242,12 +242,10 @@ size_t _z_link_recv_exact_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, size_t len
 }
 
 size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_sys_net_socket_t socket) {
-    // nano-ros: a link with no socket (custom, IVC, CAN) reads through its own
-    // `_read_f`, which receives the link and so reaches the link's state. The
-    // socket-shaped `_read_socket_f` cannot: IVC's refuses outright, so a
-    // session on IVC never received anything. This generalises the custom-link
-    // reroute to every link `_z_link_get_socket` reports as socket-less.
-    if (_z_link_get_socket(link) == NULL) {
+    // nano-ros: a link that reads through its own `_read_f` (custom, IVC,
+    // RPMsg, CAN) is routed there; its socket-shaped `_read_socket_f` cannot
+    // reach the link's state. One predicate, by link type (see link.h).
+    if (_z_link_reads_through_link(link)) {
         _ZP_UNUSED(socket);
         return _z_link_recv_zbuf(link, zbf, NULL);
     }
@@ -304,6 +302,29 @@ _z_sys_net_socket_t _z_link_peer_socket(const _z_link_t *link) {
         sock = *own;
     }
     return sock;
+}
+
+bool _z_link_reads_through_link(const _z_link_t *link) {
+    switch (link->_type) {
+#if Z_FEATURE_LINK_CUSTOM == 1
+        case _Z_LINK_TYPE_CUSTOM:
+            return true;
+#endif
+#if Z_FEATURE_LINK_IVC == 1
+        case _Z_LINK_TYPE_IVC:
+            return true;
+#endif
+#if Z_FEATURE_LINK_RPMSG == 1
+        case _Z_LINK_TYPE_RPMSG:
+            return true;
+#endif
+#if Z_FEATURE_LINK_CAN == 1
+        case _Z_LINK_TYPE_CAN:
+            return true;
+#endif
+        default:
+            return false;
+    }
 }
 
 const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link) {

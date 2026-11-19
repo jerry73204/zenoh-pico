@@ -225,6 +225,14 @@ size_t _z_link_recv_exact_zbuf(const _z_link_t *zl, _z_zbuf_t *zbf, size_t len, 
 size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_sys_net_socket_t socket);
 const _z_sys_net_socket_t *_z_link_get_socket(const _z_link_t *link);
 /*
+ * nano-ros -- true for a link that reads through its own `_read_f` (custom,
+ * IVC, RPMsg, CAN) because its socket-shaped `_read_socket_f` cannot reach the
+ * link's state. Asked by link TYPE, never by `_z_link_get_socket(..) == NULL`:
+ * the custom link hands back a non-NULL stub socket on purpose, so a NULL test
+ * routed it to a `_read_socket_f` that returns 0 and it never received anything.
+ */
+bool _z_link_reads_through_link(const _z_link_t *link);
+/*
  * nano-ros (RFC-0134 D2) -- the socket a peer entry records for a link's one
  * remote end: a copy of the link's own socket, or an all-zero socket for a link
  * that has none (IVC, CAN, custom). `*_z_link_get_socket(zl)` dereferenced NULL
