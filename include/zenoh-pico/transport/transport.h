@@ -403,9 +403,16 @@ static inline void _z_transport_tx_mutex_unlock(_z_transport_common_t *ztc) { _z
 #if Z_FEATURE_TX_SPLIT_LOCK == 1
 static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _z_mutex_lock(&ztc->_mutex_link_tx); }
 static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _z_mutex_unlock(&ztc->_mutex_link_tx); }
+static inline z_result_t _z_transport_link_tx_try_lock(_z_transport_common_t *ztc) {
+    return _z_mutex_try_lock(&ztc->_mutex_link_tx);
+}
 #else
 static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
+static inline z_result_t _z_transport_link_tx_try_lock(_z_transport_common_t *ztc) {
+    _ZP_UNUSED(ztc);
+    return _Z_RES_OK;
+}
 #endif
 static inline void _z_transport_peer_mutex_lock(_z_transport_common_t *ztc) {
     (void)_z_mutex_rec_lock(&ztc->_mutex_peer);
@@ -422,6 +429,10 @@ static inline z_result_t _z_transport_tx_mutex_lock(_z_transport_common_t *ztc, 
 static inline void _z_transport_tx_mutex_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_link_tx_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_link_tx_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
+static inline z_result_t _z_transport_link_tx_try_lock(_z_transport_common_t *ztc) {
+    _ZP_UNUSED(ztc);
+    return _Z_RES_OK;
+}
 static inline void _z_transport_peer_mutex_lock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 static inline void _z_transport_peer_mutex_unlock(_z_transport_common_t *ztc) { _ZP_UNUSED(ztc); }
 #endif  // Z_FEATURE_MULTI_THREAD == 1

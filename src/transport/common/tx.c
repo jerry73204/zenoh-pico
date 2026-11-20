@@ -71,10 +71,61 @@ static _z_zint_t _z_transport_tx_get_sn(_z_transport_common_t *ztc, z_reliabilit
     return sn;
 }
 
+// nano-ros issue 2614 -- how a send under split lock talks back to
+// `_z_transport_tx_send_n_msg`, which took `_mutex_tx` for it. A send that
+// would otherwise wait for a busy link, or write it, while holding
+// `_mutex_tx` releases `_mutex_tx` instead (`released`) when it may
+// (`can_release`: not under BATCH_TX_MUTEX, which keeps the mutex across
+// sends). With `retry` it has changed nothing that matters and asks to be
+// run again from the start once the link is free.
+typedef struct {
+    bool can_release;
+    bool released;
+    bool retry;
+} _z_transport_tx_ctl_t;
+
+#if Z_FEATURE_TX_SPLIT_LOCK == 1 && Z_FEATURE_MULTI_THREAD == 1
+static inline bool _z_transport_tx_ctl_may_release(const _z_transport_tx_ctl_t *ctl) {
+    return (ctl != NULL) && ctl->can_release && !ctl->released;
+}
+
+static inline void _z_transport_tx_ctl_release(_z_transport_common_t *ztc, _z_transport_tx_ctl_t *ctl) {
+    _z_transport_tx_mutex_unlock(ztc);
+    ctl->released = true;
+}
+
+// Release `_mutex_tx` and ask for the send to start over once the link,
+// which another writer holds, is free.
+static inline z_result_t _z_transport_tx_ctl_retry(_z_transport_common_t *ztc, _z_transport_tx_ctl_t *ctl) {
+    _z_transport_tx_ctl_release(ztc, ctl);
+    ctl->retry = true;
+    return _Z_RES_OK;
+}
+
+// The SN the next send on this channel takes, and putting one back. Caller
+// holds `_mutex_tx`.
+static inline _z_zint_t _z_transport_tx_sn_after(const _z_transport_common_t *ztc, z_reliability_t reliability) {
+    return (reliability == Z_RELIABILITY_RELIABLE) ? ztc->_sn_tx_reliable : ztc->_sn_tx_best_effort;
+}
+
+static inline void _z_transport_tx_sn_set(_z_transport_common_t *ztc, z_reliability_t reliability, _z_zint_t sn) {
+    if (reliability == Z_RELIABILITY_RELIABLE) {
+        ztc->_sn_tx_reliable = sn;
+    } else {
+        ztc->_sn_tx_best_effort = sn;
+    }
+}
+#endif
+
 #if Z_FEATURE_FRAGMENTATION == 1
 static z_result_t _z_transport_tx_drain_pending_spare_locked(_z_transport_common_t *ztc,
                                                              _z_transport_peer_unicast_slist_t *peers);
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+static z_result_t _z_transport_tx_send_finalized_locked(_z_transport_common_t *ztc, const _z_wbuf_t *wbuf,
+                                                        _z_transport_peer_unicast_slist_t *peers);
+#endif
 
+#if Z_FEATURE_TX_SPLIT_LOCK == 0
 static z_result_t _z_transport_tx_send_fragment_inner(_z_transport_common_t *ztc, _z_wbuf_t *frag_buff,
                                                       const _z_network_message_t *n_msg, z_reliability_t reliability,
                                                       _z_zint_t first_sn, _z_transport_peer_unicast_slist_t *peers) {
@@ -113,10 +164,83 @@ static z_result_t _z_transport_tx_send_fragment_inner(_z_transport_common_t *ztc
     }
     return _Z_RES_OK;
 }
+#endif
 
+#if Z_FEATURE_TX_SPLIT_LOCK == 1
+// nano-ros issue 2614 -- how many fragments `__unsafe_z_serialize_zenoh_fragment`
+// cuts `len` encoded bytes into, each in a buffer of `ztc->_wbuf_spare`'s
+// capacity. It mirrors that function: a fragment header is the header byte,
+// the SN as a z-int and, on the first fragment only, the one-byte FIRST
+// extension (no DROP extension is ever sent); the final flag does not change
+// the size. 0 when a buffer cannot hold a header.
+static size_t _z_transport_tx_fragment_count(const _z_transport_common_t *ztc, size_t len, _z_zint_t first_sn) {
+    size_t room = _z_wbuf_capacity(&ztc->_wbuf_spare);
+    if (ztc->_link->_cap._flow == Z_LINK_CAP_FLOW_STREAM) {
+        if (room <= _Z_MSG_LEN_ENC_SIZE) {
+            return 0;
+        }
+        room -= _Z_MSG_LEN_ENC_SIZE;
+    }
+    size_t count = 0;
+    _z_zint_t sn = first_sn;
+    bool first = true;
+    while (len > 0) {
+        size_t hdr = 1u + (size_t)_z_zint_len((uint64_t)sn) + (first ? 1u : 0u);
+        if (room <= hdr) {
+            return 0;
+        }
+        size_t take = (len < room - hdr) ? len : room - hdr;
+        len -= take;
+        count++;
+        first = false;
+        sn = _z_sn_increment(ztc->_sn_res, sn);
+    }
+    return count;
+}
+
+// Write the fragments of `frag_buff` with the SNs first_sn, first_sn + 1, ...
+// (count of them, reserved by the caller). Caller holds `_mutex_link_tx` and
+// NOT necessarily `_mutex_tx`: the fragments are serialized into the spare,
+// which only a link-mutex holder touches (the caller drained it first), never
+// into `_wbuf`, which publishers keep appending to.
+static z_result_t _z_transport_tx_write_fragments_locked(_z_transport_common_t *ztc, _z_wbuf_t *frag_buff,
+                                                         z_reliability_t reliability, _z_zint_t first_sn, size_t count,
+                                                         _z_transport_peer_unicast_slist_t *peers) {
+    _z_wbuf_t *wbuf = &ztc->_wbuf_spare;
+    _z_zint_t sn = first_sn;
+    bool is_first = true;
+    size_t written = 0;
+    z_result_t ret = _Z_RES_OK;
+    while ((ret == _Z_RES_OK) && (_z_wbuf_len(frag_buff) > 0)) {
+        if (written == count) {
+            // Unreachable while _z_transport_tx_fragment_count mirrors the
+            // serializer; a further fragment would reuse a SN another
+            // sender already holds.
+            _Z_ERROR("Fragment train outgrew its %u reserved sequence numbers", (unsigned)count);
+            ret = _Z_ERR_TRANSPORT_TX_FAILED;
+            break;
+        }
+        __unsafe_z_prepare_wbuf(wbuf, ztc->_link->_cap._flow);
+        ret = __unsafe_z_serialize_zenoh_fragment(wbuf, frag_buff, reliability, sn, is_first);
+        if (ret != _Z_RES_OK) {
+            _Z_ERROR("Fragment serialization failed with err %d", ret);
+            break;
+        }
+        __unsafe_z_finalize_wbuf(wbuf, ztc->_link->_cap._flow);
+        ret = _z_transport_tx_send_finalized_locked(ztc, wbuf, peers);
+        sn = _z_sn_increment(ztc->_sn_res, sn);
+        is_first = false;
+        written++;
+    }
+    _z_wbuf_reset(wbuf);
+    return ret;
+}
+#endif
+
+// `ctl` may be NULL (the mutex is then never released here).
 static z_result_t _z_transport_tx_send_fragment(_z_transport_common_t *ztc, const _z_network_message_t *n_msg,
                                                 z_reliability_t reliability, _z_zint_t first_sn,
-                                                _z_transport_peer_unicast_slist_t *peers) {
+                                                _z_transport_peer_unicast_slist_t *peers, _z_transport_tx_ctl_t *ctl) {
     // Create an expandable wbuf for fragmentation
     _z_wbuf_t frag_buff = _z_wbuf_make(_Z_FRAG_BUFF_BASE_SIZE, true);
 #if Z_FEATURE_TX_SPLIT_LOCK == 1
@@ -126,13 +250,58 @@ static z_result_t _z_transport_tx_send_fragment(_z_transport_common_t *ztc, cons
     // batch this message overflowed), so it ships first, under the same hold:
     // the fragments used to go out ahead of it, and a reliable receiver saw
     // its sequence numbers out of order.
-    _z_transport_link_tx_lock(ztc);
-    z_result_t ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+    //
+    // nano-ros issue 2614 -- the fragments no longer go out under `_mutex_tx`,
+    // which made every publisher wait out the whole train. Under `_mutex_tx`
+    // this call encodes the message, reserves one SN per fragment (so nothing
+    // encoded later can take one of them) and takes the link mutex (so nothing
+    // written later can reach the wire first); then it releases `_mutex_tx` and
+    // writes the parked batch and the fragments under the link mutex alone, in
+    // the spare. The wire keeps SN order and a train stays unbroken, which a
+    // receiver's defragmentation needs. When another writer holds the link,
+    // this call does not wait for it holding `_mutex_tx`: it gives `first_sn`
+    // back (it is the last SN taken) and asks to be run again.
+    z_result_t ret = _z_network_message_encode(&frag_buff, n_msg);
+    size_t count = 0;
     if (ret == _Z_RES_OK) {
-        ret = _z_transport_tx_send_fragment_inner(ztc, &frag_buff, n_msg, reliability, first_sn, peers);
+        count = _z_transport_tx_fragment_count(ztc, _z_wbuf_len(&frag_buff), first_sn);
+        if (count == 0) {
+            _Z_ERROR("A batch of %u bytes cannot hold a fragment", (unsigned)_z_wbuf_capacity(&ztc->_wbuf_spare));
+            ret = _Z_ERR_TRANSPORT_TX_FAILED;
+        }
     }
-    _z_transport_link_tx_unlock(ztc);
+    bool locked = false;
+#if Z_FEATURE_MULTI_THREAD == 1
+    if ((ret == _Z_RES_OK) && _z_transport_tx_ctl_may_release(ctl) &&
+        (_z_transport_tx_sn_after(ztc, reliability) == _z_sn_increment(ztc->_sn_res, first_sn))) {
+        if (_z_transport_link_tx_try_lock(ztc) != _Z_RES_OK) {
+            _z_transport_tx_sn_set(ztc, reliability, first_sn);
+            _z_wbuf_clear(&frag_buff);
+            return _z_transport_tx_ctl_retry(ztc, ctl);
+        }
+        locked = true;
+    }
+#endif
+    if (ret == _Z_RES_OK) {
+        for (size_t i = 1; i < count; i++) {
+            (void)_z_transport_tx_get_sn(ztc, reliability);
+        }
+        if (!locked) {
+            _z_transport_link_tx_lock(ztc);
+        }
+#if Z_FEATURE_MULTI_THREAD == 1
+        if (_z_transport_tx_ctl_may_release(ctl)) {
+            _z_transport_tx_ctl_release(ztc, ctl);
+        }
+#endif
+        ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+        if (ret == _Z_RES_OK) {
+            ret = _z_transport_tx_write_fragments_locked(ztc, &frag_buff, reliability, first_sn, count, peers);
+        }
+        _z_transport_link_tx_unlock(ztc);
+    }
 #else
+    _ZP_UNUSED(ctl);
     // Send message as fragments
     z_result_t ret = _z_transport_tx_send_fragment_inner(ztc, &frag_buff, n_msg, reliability, first_sn, peers);
 #endif
@@ -144,7 +313,8 @@ static z_result_t _z_transport_tx_send_fragment(_z_transport_common_t *ztc, cons
 #else
 static z_result_t _z_transport_tx_send_fragment(_z_transport_common_t *ztc, const _z_network_message_t *n_msg,
                                                 z_reliability_t reliability, _z_zint_t first_sn,
-                                                _z_transport_peer_unicast_slist_t *peers) {
+                                                _z_transport_peer_unicast_slist_t *peers, _z_transport_tx_ctl_t *ctl) {
+    _ZP_UNUSED(ctl);
     _ZP_UNUSED(ztc);
     _ZP_UNUSED(n_msg);
     _ZP_UNUSED(reliability);
@@ -224,6 +394,59 @@ static z_result_t _z_transport_tx_flush_buffer(_z_transport_common_t *ztc, _z_tr
     return _Z_RES_OK;
 }
 
+// nano-ros issue 2614 -- an express message was just encoded into `_wbuf`
+// (behind `had_data` batched ones, or alone in a fresh frame that took `sn`),
+// and goes out now. Under split lock the write leaves `_mutex_tx` the way the
+// batch flush does: take the link mutex, steal `_wbuf` into the spare, release
+// `_mutex_tx`, write. When the link is busy, or a parked batch must go first,
+// the encode is undone and the send asked to start over (the parked batch is
+// shipped first, under the link mutex alone), so no publisher waits behind
+// this one for the link.
+static z_result_t _z_transport_tx_flush_express(_z_transport_common_t *ztc, _z_transport_peer_unicast_slist_t *peers,
+                                                _z_transport_tx_ctl_t *ctl, z_reliability_t reliability, bool had_data,
+                                                size_t prev_wpos, _z_zint_t sn) {
+#if Z_FEATURE_TX_SPLIT_LOCK == 1 && Z_FEATURE_BATCHING == 1 && Z_FEATURE_MULTI_THREAD == 1
+    // Undoing the encode needs either the earlier batch (cut back to it) or
+    // the SN the fresh frame took to still be the last one taken.
+    bool undoable = had_data || (_z_transport_tx_sn_after(ztc, reliability) == _z_sn_increment(ztc->_sn_res, sn));
+    if (_z_transport_tx_ctl_may_release(ctl) && undoable) {
+        bool locked = _z_transport_link_tx_try_lock(ztc) == _Z_RES_OK;
+        if (!locked || ztc->_spare_pending) {
+            if (had_data) {
+                _z_wbuf_set_wpos(&ztc->_wbuf, prev_wpos);
+            } else {
+                _z_transport_tx_sn_set(ztc, reliability, sn);
+            }
+            if (!locked) {
+                return _z_transport_tx_ctl_retry(ztc, ctl);
+            }
+            _z_transport_tx_ctl_release(ztc, ctl);
+            z_result_t drain_ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+            _z_transport_link_tx_unlock(ztc);
+            ctl->retry = (drain_ret == _Z_RES_OK);
+            return drain_ret;
+        }
+        __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
+        _z_wbuf_t stolen = ztc->_wbuf;
+        ztc->_wbuf = ztc->_wbuf_spare;
+        ztc->_wbuf_spare = stolen;
+        ztc->_batch_count = 0;
+        _z_transport_tx_ctl_release(ztc, ctl);
+        z_result_t ret = _z_transport_tx_send_finalized_locked(ztc, &ztc->_wbuf_spare, peers);
+        _z_wbuf_reset(&ztc->_wbuf_spare);
+        _z_transport_link_tx_unlock(ztc);
+        return ret;
+    }
+#else
+    _ZP_UNUSED(ctl);
+    _ZP_UNUSED(reliability);
+    _ZP_UNUSED(had_data);
+    _ZP_UNUSED(prev_wpos);
+    _ZP_UNUSED(sn);
+#endif
+    return _z_transport_tx_flush_buffer(ztc, peers);
+}
+
 static z_result_t _z_transport_tx_flush_or_incr_batch(_z_transport_common_t *ztc,
                                                       _z_transport_peer_unicast_slist_t *peers) {
 #if Z_FEATURE_BATCHING == 1
@@ -241,7 +464,7 @@ static z_result_t _z_transport_tx_flush_or_incr_batch(_z_transport_common_t *ztc
 
 static z_result_t _z_transport_tx_batch_overflow(_z_transport_common_t *ztc, const _z_network_message_t *n_msg,
                                                  z_reliability_t reliability, _z_zint_t sn, size_t prev_wpos,
-                                                 _z_transport_peer_unicast_slist_t *peers) {
+                                                 _z_transport_peer_unicast_slist_t *peers, _z_transport_tx_ctl_t *ctl) {
 #if Z_FEATURE_BATCHING == 1
     // Remove partially encoded data
     _z_wbuf_set_wpos(&ztc->_wbuf, prev_wpos);
@@ -254,8 +477,34 @@ static z_result_t _z_transport_tx_batch_overflow(_z_transport_common_t *ztc, con
     // (natural backpressure: at most one parked batch). Spare access requires
     // the link mutex: this also WAITS for any detached send that is reading
     // the spare, so the swap can never corrupt an in-flight write.
-    __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
+    //
+    // nano-ros issue 2614 -- neither wait happens under `_mutex_tx` when this
+    // call may release it: a busy link, or a parked batch still to ship, sends
+    // the publisher back to the start (its partial encode is already undone),
+    // after shipping that batch under the link mutex alone, so the other
+    // publishers keep appending meanwhile.
+#if Z_FEATURE_MULTI_THREAD == 1
+    if (_z_transport_tx_ctl_may_release(ctl)) {
+        if (_z_transport_link_tx_try_lock(ztc) != _Z_RES_OK) {
+            return _z_transport_tx_ctl_retry(ztc, ctl);
+        }
+        if (ztc->_spare_pending) {
+            _z_transport_tx_ctl_release(ztc, ctl);
+            z_result_t drain_ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+            _z_transport_link_tx_unlock(ztc);
+            if (drain_ret != _Z_RES_OK) {
+                return drain_ret;
+            }
+            ctl->retry = true;
+            return _Z_RES_OK;
+        }
+    } else {
+        _z_transport_link_tx_lock(ztc);
+    }
+#else
     _z_transport_link_tx_lock(ztc);
+#endif
+    __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
     {
         z_result_t drain_ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
         if (drain_ret != _Z_RES_OK) {
@@ -282,11 +531,11 @@ static z_result_t _z_transport_tx_batch_overflow(_z_transport_common_t *ztc, con
     z_result_t ret = _z_network_message_encode(&ztc->_wbuf, n_msg);
     if (ret != _Z_RES_OK) {
         // Message still doesn't fit in buffer, send as fragments
-        return _z_transport_tx_send_fragment(ztc, n_msg, reliability, sn, peers);
+        return _z_transport_tx_send_fragment(ztc, n_msg, reliability, sn, peers, ctl);
     } else {
         if (_z_transport_tx_get_express_status(n_msg)) {
             // Send immediately
-            return _z_transport_tx_flush_buffer(ztc, peers);
+            return _z_transport_tx_flush_express(ztc, peers, ctl, reliability, false, 0, sn);
         } else {
             // Increment batch
             ztc->_batch_count++;
@@ -300,6 +549,7 @@ static z_result_t _z_transport_tx_batch_overflow(_z_transport_common_t *ztc, con
     _ZP_UNUSED(sn);
     _ZP_UNUSED(prev_wpos);
     _ZP_UNUSED(peers);
+    _ZP_UNUSED(ctl);
     return _Z_RES_OK;
 #endif
 }
@@ -315,7 +565,8 @@ static inline size_t _z_transport_tx_save_wpos(_z_wbuf_t *wbuf) {
 
 static z_result_t _z_transport_tx_send_n_msg_inner(_z_transport_common_t *ztc, const _z_network_message_t *n_msg,
                                                    z_reliability_t reliability,
-                                                   _z_transport_peer_unicast_slist_t *peers) {
+                                                   _z_transport_peer_unicast_slist_t *peers,
+                                                   _z_transport_tx_ctl_t *ctl) {
     // Init buffer
     _z_zint_t sn = 0;
     bool batch_has_data = _z_transport_tx_batch_has_data(ztc);
@@ -331,17 +582,17 @@ static z_result_t _z_transport_tx_send_n_msg_inner(_z_transport_common_t *ztc, c
     if (ret == _Z_RES_OK) {
         if (_z_transport_tx_get_express_status(n_msg)) {
             // Send immediately
-            return _z_transport_tx_flush_buffer(ztc, peers);
+            return _z_transport_tx_flush_express(ztc, peers, ctl, reliability, batch_has_data, prev_wpos, sn);
         } else {
             // Flush buffer or increase batch
             return _z_transport_tx_flush_or_incr_batch(ztc, peers);
         }
     } else if (!batch_has_data) {
         // Message doesn't fit in buffer, send as fragments
-        return _z_transport_tx_send_fragment(ztc, n_msg, reliability, sn, peers);
+        return _z_transport_tx_send_fragment(ztc, n_msg, reliability, sn, peers, ctl);
     } else {
         // Buffer is too full for message
-        return _z_transport_tx_batch_overflow(ztc, n_msg, reliability, sn, prev_wpos, peers);
+        return _z_transport_tx_batch_overflow(ztc, n_msg, reliability, sn, prev_wpos, peers, ctl);
     }
 }
 
@@ -395,26 +646,51 @@ static z_result_t _z_transport_tx_send_n_msg(_z_transport_common_t *ztc, const _
     z_result_t ret = _Z_RES_OK;
     _Z_DEBUG("Send network message");
 
-    // Acquire the lock and drop the message if needed
-    if (!_z_transport_batch_hold_tx_mutex()) {
-        ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);
-    }
-    if (ret != _Z_RES_OK) {
-        // Only DROP reaches here: BLOCK waits for the lock. Dropping under DROP
-        // is the requested behaviour, not a failure, so report success, as
-        // zenoh's DROP does. The try-lock's error is the port's own code (-1,
-        // _Z_ERR_GENERIC or an errno mapping), so a caller could not tell it
-        // from a real send failure anyway (nano-ros issue 2005).
-        _Z_INFO("Dropping zenoh message because of congestion control");
-        return _Z_RES_OK;
-    }
-    // Process message
-    ret = _z_transport_tx_send_n_msg_inner(ztc, n_msg, reliability, peers);
-    if (!_z_transport_batch_hold_tx_mutex()) {
-        _z_transport_tx_mutex_unlock(ztc);
-    }
+    _z_transport_tx_ctl_t ctl;
+    do {
+        // Acquire the lock and drop the message if needed
+        if (!_z_transport_batch_hold_tx_mutex()) {
+            ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);
+        }
+        if (ret != _Z_RES_OK) {
+            // Only DROP reaches here: BLOCK waits for the lock. Dropping under DROP
+            // is the requested behaviour, not a failure, so report success, as
+            // zenoh's DROP does. The try-lock's error is the port's own code (-1,
+            // _Z_ERR_GENERIC or an errno mapping), so a caller could not tell it
+            // from a real send failure anyway (nano-ros issue 2005).
+            _Z_INFO("Dropping zenoh message because of congestion control");
+            return _Z_RES_OK;
+        }
+        // Process message. Under split lock a send that would wait for, or
+        // write, the link releases `_mutex_tx` itself (nano-ros issue 2614)
+        // and says so in `ctl`; with `retry` it starts over once the link is
+        // free.
+        ctl.can_release = !_z_transport_batch_hold_tx_mutex();
+        ctl.released = false;
+        ctl.retry = false;
+        ret = _z_transport_tx_send_n_msg_inner(ztc, n_msg, reliability, peers, &ctl);
+        if (!ctl.released && !_z_transport_batch_hold_tx_mutex()) {
+            _z_transport_tx_mutex_unlock(ztc);
+        }
+        if (ctl.retry) {
+            // Wait for the writer holding the link, without `_mutex_tx`.
+            _z_transport_link_tx_lock(ztc);
+            _z_transport_link_tx_unlock(ztc);
+        }
+    } while (ctl.retry && (ret == _Z_RES_OK));
     return ret;
 }
+
+#if Z_FEATURE_BATCHING == 1 && Z_FEATURE_TX_SPLIT_LOCK == 1
+// Take the link mutex: wait for it under BLOCK, only try under DROP. True when held.
+static bool _z_transport_tx_link_acquire(_z_transport_common_t *ztc, z_congestion_control_t cong_ctrl) {
+    if (cong_ctrl == Z_CONGESTION_CONTROL_BLOCK) {
+        _z_transport_link_tx_lock(ztc);
+        return true;
+    }
+    return _z_transport_link_tx_try_lock(ztc) == _Z_RES_OK;
+}
+#endif
 
 static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_congestion_control_t cong_ctrl,
                                                _z_transport_peer_unicast_slist_t *peers) {
@@ -422,6 +698,12 @@ static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_con
     z_result_t ret = _Z_RES_OK;
 #if Z_FEATURE_TX_SPLIT_LOCK == 1
     // A parked overflow batch must ship even when the current batch is empty.
+    // nano-ros issue 2614 -- and it ships under the link mutex alone: taking
+    // the link mutex before releasing `_mutex_tx` keeps it ahead of anything
+    // encoded later, and the spare is only touched under the link mutex, so
+    // publishers need not wait out its write. Under DROP (the periodic flush)
+    // a link that is busy is left alone: the writer holding it, or the next
+    // flush, ships the batch.
     if (ztc->_batch_count == 0 && ztc->_spare_pending) {
         if (!_z_transport_batch_hold_tx_mutex()) {
             ret = _z_transport_tx_mutex_lock(ztc, cong_ctrl == Z_CONGESTION_CONTROL_BLOCK);
@@ -429,12 +711,17 @@ static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_con
         if (ret != _Z_RES_OK) {
             return ret;
         }
-        _z_transport_link_tx_lock(ztc);
-        ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
-        _z_transport_link_tx_unlock(ztc);
+        if (!_z_transport_tx_link_acquire(ztc, cong_ctrl)) {
+            if (!_z_transport_batch_hold_tx_mutex()) {
+                _z_transport_tx_mutex_unlock(ztc);
+            }
+            return _Z_RES_OK;
+        }
         if (!_z_transport_batch_hold_tx_mutex()) {
             _z_transport_tx_mutex_unlock(ztc);
         }
+        ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
+        _z_transport_link_tx_unlock(ztc);
         return ret;
     }
 #endif
@@ -458,12 +745,19 @@ static z_result_t _z_transport_tx_send_n_batch(_z_transport_common_t *ztc, z_con
         // acquired BEFORE `_mutex_tx` is released so wire order == SN/encode
         // order (a newer express/immediate send cannot overtake the batch).
         if (ztc->_batch_count > 0) {
-            __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
             // Take the LINK mutex before releasing the tx mutex: wire order
             // stays == SN order, and the spare (our send buffer) cannot be
             // touched by a concurrent overflow steal (spare access requires
-            // the link mutex).
-            _z_transport_link_tx_lock(ztc);
+            // the link mutex). Under DROP a busy link is not waited for while
+            // holding `_mutex_tx` (nano-ros issue 2614): every publisher would
+            // wait with it. The batch stays for the next flush.
+            if (!_z_transport_tx_link_acquire(ztc, cong_ctrl)) {
+                if (!_z_transport_batch_hold_tx_mutex()) {
+                    _z_transport_tx_mutex_unlock(ztc);
+                }
+                return _Z_RES_OK;
+            }
+            __unsafe_z_finalize_wbuf(&ztc->_wbuf, ztc->_link->_cap._flow);
             // Ship any overflow-parked batch first (older SNs).
             ret = _z_transport_tx_drain_pending_spare_locked(ztc, peers);
             if (ret != _Z_RES_OK) {

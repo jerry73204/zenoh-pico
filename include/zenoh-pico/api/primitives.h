@@ -3174,6 +3174,21 @@ z_result_t zp_batch_start(const z_loaned_session_t *zs);
 z_result_t zp_batch_flush(const z_loaned_session_t *zs);
 
 /**
+ * Send the currently batched messages on the network unless that means waiting: when another thread holds the
+ * session's transmit lock, or the link is busy writing, nothing is sent and the batch stays for a later flush. Meant
+ * for a periodic flush task, which would otherwise hold the transmit lock while it waits for the link and stall every
+ * publisher with it.
+ *
+ * Parameters:
+ *   zs: Pointer to a :c:type:`z_loaned_session_t` that will send its batched messages.
+ *
+ * Return:
+ *   ``0`` if the batch was sent or left for later because the link was busy, ``negative value`` if the transmit
+ *   lock was busy or the send failed.
+ */
+z_result_t zp_batch_flush_try(const z_loaned_session_t *zs);
+
+/**
  * Deactivate the batching mechanism and send the currently batched on the network.
  *
  * Parameters:

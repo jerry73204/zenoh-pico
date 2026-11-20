@@ -130,6 +130,18 @@ static void close_fake_session(void) {
 
 static uint8_t g_payload[4 * LINK_MTU];
 
+static z_result_t send_push_qos(size_t len, _z_n_qos_t qos) {
+    _z_wireexpr_t key = _z_wireexpr_null();
+    key._id = 1;
+    _z_bytes_t payload;
+    _z_bytes_from_buf(&payload, g_payload, len);
+    _z_network_message_t msg;
+    _z_n_msg_make_push_put(&msg, &key, &payload, NULL, qos, NULL, NULL, Z_RELIABILITY_RELIABLE, NULL);
+    z_result_t ret = _z_send_n_msg(&g_zn, &msg, Z_RELIABILITY_RELIABLE, Z_CONGESTION_CONTROL_BLOCK, NULL);
+    _z_bytes_drop(&payload);
+    return ret;
+}
+
 static z_result_t send_push(size_t len) {
     _z_wireexpr_t key = _z_wireexpr_null();
     key._id = 1;
@@ -146,6 +158,20 @@ static z_result_t send_push(size_t len) {
 static bool sns_in_order(int n, int *first_bad) {
     for (int i = 1; i < n; i++) {
         if (g_writes[i].sn < g_writes[i - 1].sn) {
+            *first_bad = i;
+            return false;
+        }
+    }
+    return true;
+}
+
+// nano-ros issue 2614 -- every frame and every fragment takes one reliable SN,
+// so the wire must carry them exactly consecutive. That also says a fragment
+// train is unbroken (nothing can sit between two of its fragments) and that
+// a train used exactly the SNs it reserved.
+static bool sns_consecutive(int n, int *first_bad) {
+    for (int i = 1; i < n; i++) {
+        if (g_writes[i].sn != g_writes[i - 1].sn + 1) {
             *first_bad = i;
             return false;
         }
@@ -237,12 +263,226 @@ static void fragment_and_detached_send_never_overlap(void) {
     printf("        %d write(s), %d overlapping, SN order %s\n", n, overlaps, ordered ? "kept" : "broken");
     CHECK(overlaps == 0, "no link write starts while another is in progress");
     CHECK(ordered, "every write's SN is >= the one before it");
+    bool consecutive = sns_consecutive(n < MAX_WRITES ? n : MAX_WRITES, &bad);
+    if (!consecutive) {
+        printf("        write %d: sn=%llu after sn=%llu\n", bad, (unsigned long long)g_writes[bad].sn,
+               (unsigned long long)g_writes[bad - 1].sn);
+    }
+    CHECK(consecutive, "every write's SN is one more than the one before it (no train is broken)");
+    close_fake_session();
+}
+
+// 3. nano-ros issue 2614: a fragment train is written under the link mutex
+//    only, so a publisher that appends to the batch while it is on the wire
+//    does not wait for it. The link takes 20 ms per write; a train of three
+//    or more fragments holds it for 60 ms or more.
+static atomic_int g_train_done;
+
+static void *train_sender(void *arg) {
+    (void)arg;
+    send_push(3 * LINK_MTU);
+    atomic_store(&g_train_done, 1);
+    return NULL;
+}
+
+static void publisher_does_not_wait_out_a_train(void) {
+    printf("a small publish during a fragment train does not wait for the train\n");
+    open_fake_session();
+    atomic_store(&g_write_delay_us, 20000);
+    atomic_store(&g_train_done, 0);
+    _z_task_t t_train;
+    _z_task_init(&t_train, NULL, train_sender, NULL);
+    while (atomic_load(&g_in_write) == 0 && atomic_load(&g_train_done) == 0) {
+        z_sleep_us(100);
+    }
+    z_clock_t start = z_clock_now();
+    z_result_t ret = send_push(16);
+    unsigned long waited_ms = z_clock_elapsed_ms(&start);
+    bool train_still_running = atomic_load(&g_train_done) == 0;
+    _z_task_join(&t_train);
+    _z_send_n_batch(&g_zn, Z_CONGESTION_CONTROL_BLOCK);
+    int n = atomic_load(&g_nwrites);
+    int bad = -1;
+    dump_writes(n);
+    printf("        the small publish took %lu ms; the train was %s when it returned\n", waited_ms,
+           train_still_running ? "still on the wire" : "done");
+    CHECK(ret == _Z_RES_OK, "the small publish succeeds");
+    CHECK(waited_ms < 10 && train_still_running, "the small publish returns while the train is still on the wire");
+    CHECK(sns_consecutive(n, &bad), "every write's SN is one more than the one before it");
+    CHECK(n >= 4 && g_writes[n - 1].mid == _Z_MID_T_FRAME, "the small sample's batch follows the whole train");
+    close_fake_session();
+}
+
+// 5. The periodic flush (DROP) does not wait for a busy link while it holds
+//    the tx mutex: it leaves the batch, and a publisher right behind it is
+//    not stalled for the rest of the train.
+static void drop_flush_leaves_a_busy_link(void) {
+    printf("a DROP flush during a fragment train returns at once and leaves the batch\n");
+    open_fake_session();
+    atomic_store(&g_write_delay_us, 20000);
+    atomic_store(&g_train_done, 0);
+    _z_task_t t_train;
+    _z_task_init(&t_train, NULL, train_sender, NULL);
+    while (atomic_load(&g_in_write) == 0 && atomic_load(&g_train_done) == 0) {
+        z_sleep_us(100);
+    }
+    send_push(16);
+    z_clock_t start = z_clock_now();
+    z_result_t ret = _z_send_n_batch(&g_zn, Z_CONGESTION_CONTROL_DROP);
+    unsigned long flush_ms = z_clock_elapsed_ms(&start);
+    size_t left = g_zn._tp._transport._unicast._common._batch_count;
+    start = z_clock_now();
+    send_push(16);
+    unsigned long pub_ms = z_clock_elapsed_ms(&start);
+    bool train_still_running = atomic_load(&g_train_done) == 0;
+    _z_task_join(&t_train);
+    _z_send_n_batch(&g_zn, Z_CONGESTION_CONTROL_BLOCK);
+    int n = atomic_load(&g_nwrites);
+    int bad = -1;
+    printf("        the flush took %lu ms and left %u sample(s); the next publish took %lu ms; train %s\n", flush_ms,
+           (unsigned)left, pub_ms, train_still_running ? "still on the wire" : "done");
+    CHECK(ret == _Z_RES_OK, "the DROP flush reports success");
+    CHECK(flush_ms < 10 && left == 1, "the DROP flush returns at once and keeps the batch");
+    CHECK(pub_ms < 10 && train_still_running, "the next publish is not stalled by the train");
+    CHECK(sns_consecutive(n, &bad), "every write's SN is one more than the one before it");
+    close_fake_session();
+}
+
+// 6. A publisher that overflows the batch while an earlier overflow is still
+//    parked ships that parked batch under the link mutex alone, so a small
+//    publisher keeps appending while it is on the wire. A burst of samples of
+//    0.6 batch each (every one overflows) runs over a 20 ms link while a
+//    small publisher sends every 5 ms.
+static atomic_int g_burst_done;
+
+static void *burst_sender(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 8; i++) {
+        send_push((LINK_MTU * 6) / 10);
+    }
+    atomic_store(&g_burst_done, 1);
+    return NULL;
+}
+
+static int cmp_ulong(const void *a, const void *b) {
+    unsigned long x = *(const unsigned long *)a, y = *(const unsigned long *)b;
+    return (x > y) - (x < y);
+}
+
+static void small_publisher_keeps_going_during_overflow_drains(void) {
+    printf("a small publisher keeps appending while an overflow's parked batch is written\n");
+    open_fake_session();
+    atomic_store(&g_write_delay_us, 20000);
+    atomic_store(&g_burst_done, 0);
+    _z_task_t t_burst;
+    _z_task_init(&t_burst, NULL, burst_sender, NULL);
+    static unsigned long lat_us[4096];
+    int n_lat = 0;
+    while (atomic_load(&g_burst_done) == 0 && n_lat < 4096) {
+        z_clock_t start = z_clock_now();
+        send_push(16);
+        lat_us[n_lat++] = z_clock_elapsed_us(&start);
+        z_sleep_us(5000);
+    }
+    _z_task_join(&t_burst);
+    _z_send_n_batch(&g_zn, Z_CONGESTION_CONTROL_BLOCK);
+    qsort(lat_us, (size_t)n_lat, sizeof(lat_us[0]), cmp_ulong);
+    int over = 0;
+    for (int i = 0; i < n_lat; i++) {
+        if (lat_us[i] >= 10000) {
+            over++;
+        }
+    }
+    int n = atomic_load(&g_nwrites);
+    int bad = -1;
+    printf("        %d small publish(es): p50 %lu us, p90 %lu us, max %lu us, %d of them >= 10 ms\n", n_lat,
+           n_lat ? lat_us[n_lat / 2] : 0ul, n_lat ? lat_us[(n_lat * 9) / 10] : 0ul, n_lat ? lat_us[n_lat - 1] : 0ul,
+           over);
+    CHECK(n_lat > 0 && lat_us[(n_lat * 9) / 10] < 10000,
+          "nine in ten small publishes return without a link write's wait");
+    CHECK(sns_consecutive(n, &bad), "every write's SN is one more than the one before it");
+    close_fake_session();
+}
+
+// 7. An express sample needs the link now, so it waits for a train on the
+//    wire; it waits without the tx mutex, so a batched publisher behind it
+//    is not held up.
+static atomic_int g_express_done;
+
+static void *express_sender(void *arg) {
+    (void)arg;
+    send_push_qos(16, _z_n_qos_make(1, 1, Z_PRIORITY_DEFAULT));
+    atomic_store(&g_express_done, 1);
+    return NULL;
+}
+
+static void express_waits_for_the_link_without_the_tx_mutex(void) {
+    printf("an express sample waits for a train without holding up a batched publisher\n");
+    open_fake_session();
+    atomic_store(&g_write_delay_us, 20000);
+    atomic_store(&g_train_done, 0);
+    atomic_store(&g_express_done, 0);
+    _z_task_t t_train, t_express;
+    _z_task_init(&t_train, NULL, train_sender, NULL);
+    while (atomic_load(&g_in_write) == 0 && atomic_load(&g_train_done) == 0) {
+        z_sleep_us(100);
+    }
+    _z_task_init(&t_express, NULL, express_sender, NULL);
+    z_sleep_us(5000);
+    z_clock_t start = z_clock_now();
+    z_result_t ret = send_push(16);
+    unsigned long pub_ms = z_clock_elapsed_ms(&start);
+    bool train_still_running = atomic_load(&g_train_done) == 0;
+    bool express_waiting = atomic_load(&g_express_done) == 0;
+    _z_task_join(&t_train);
+    _z_task_join(&t_express);
+    _z_send_n_batch(&g_zn, Z_CONGESTION_CONTROL_BLOCK);
+    int n = atomic_load(&g_nwrites);
+    int bad = -1;
+    dump_writes(n);
+    printf("        the batched publish took %lu ms; the express sample was %s, the train %s\n", pub_ms,
+           express_waiting ? "still waiting" : "out", train_still_running ? "still on the wire" : "done");
+    CHECK(ret == _Z_RES_OK, "the batched publish succeeds");
+    CHECK(pub_ms < 10 && express_waiting && train_still_running,
+          "the batched publish returns while the express sample waits for the train");
+    CHECK(sns_consecutive(n, &bad), "every write's SN is one more than the one before it");
+    close_fake_session();
+}
+
+// 4. The SNs a train reserves are counted before it is cut; the count must
+//    match the serializer for every size, including across the 127 -> 128 SN
+//    step where the SN's z-int, and so the fragment header, grows a byte.
+static void train_uses_exactly_its_reserved_sns(void) {
+    printf("a train uses exactly the SNs it reserved, for every size\n");
+    open_fake_session();
+    g_zn._tp._transport._unicast._common._sn_tx_reliable = 100;
+    for (size_t len = LINK_MTU - 16; len <= 4 * LINK_MTU - 16; len += 7) {
+        send_push(len);
+        send_push(16);
+    }
+    _z_send_n_batch(&g_zn, Z_CONGESTION_CONTROL_BLOCK);
+    int n = atomic_load(&g_nwrites);
+    int bad = -1;
+    bool consecutive = sns_consecutive(n < MAX_WRITES ? n : MAX_WRITES, &bad);
+    printf("        %d write(s), SN %llu .. %llu\n", n, n > 0 ? (unsigned long long)g_writes[0].sn : 0ull,
+           n > 0 ? (unsigned long long)g_writes[n - 1].sn : 0ull);
+    if (!consecutive) {
+        printf("        write %d: sn=%llu after sn=%llu\n", bad, (unsigned long long)g_writes[bad].sn,
+               (unsigned long long)g_writes[bad - 1].sn);
+    }
+    CHECK(n > 0 && g_writes[n - 1].sn > 128, "the SNs crossed 128");
+    CHECK(consecutive, "every write's SN is one more than the one before it");
     close_fake_session();
 }
 
 int main(void) {
     parked_batch_precedes_fragments();
     fragment_and_detached_send_never_overlap();
+    publisher_does_not_wait_out_a_train();
+    drop_flush_leaves_a_busy_link();
+    small_publisher_keeps_going_during_overflow_drains();
+    express_waits_for_the_link_without_the_tx_mutex();
+    train_uses_exactly_its_reserved_sns();
     if (failures != 0) {
         printf("%d check(s) failed\n", failures);
         return 1;

@@ -2499,6 +2499,16 @@ z_result_t zp_batch_flush(const z_loaned_session_t *zs) {
     return _z_send_n_batch(session, Z_CONGESTION_CONTROL_BLOCK);
 }
 
+z_result_t zp_batch_flush_try(const z_loaned_session_t *zs) {
+    _z_session_t *session = _Z_RC_IN_VAL(zs);
+    if (_Z_RC_IS_NULL(zs)) {
+        _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);
+    }
+    // nano-ros issue 2614 -- the periodic flush: wait for no lock, so a busy
+    // link never holds the publishers' tx mutex hostage.
+    return _z_send_n_batch(session, Z_CONGESTION_CONTROL_DROP);
+}
+
 z_result_t zp_batch_stop(const z_loaned_session_t *zs) {
     _z_session_t *session = _Z_RC_IN_VAL(zs);
     if (_Z_RC_IS_NULL(zs)) {
