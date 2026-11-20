@@ -21,6 +21,12 @@
 #include "zenoh-pico/collections/string.h"
 #include "zenoh-pico/system/platform.h"
 
+// nano-ros (issue 2774): what a link read returns when the peer closed the
+// stream. Distinct from SIZE_MAX (an error) and from 0 (nothing read). Only the
+// recv helpers in `link.c` (which record it as `_z_link_t::_rx_closed`) and the
+// link read functions see it.
+#define _Z_LINK_READ_EOF (SIZE_MAX - 1)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -476,6 +476,14 @@ _z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *execut
         size_t to_read = 0;
         // Retrieve data
         if (!_z_unicast_client_read(ztu, curr_peer, &to_read)) {
+            // nano-ros issue 2774 -- the read reached end-of-stream: the peer
+            // closed the connection, possibly without zenoh's CLOSE. Nothing
+            // more will arrive on it, so close the session (and reconnect where
+            // that is built in) instead of polling a dead socket forever.
+            if ((ztu->_common._link != NULL) && ztu->_common._link->_rx_closed) {
+                _Z_INFO("Closing session because its link reached end-of-stream");
+                return _zp_unicast_failed_result(ztu, executor);
+            }
             // nothing to read
 #if defined(Z_RX_TASK_BUDGET_FRAMES)
             _z_rx_task_budget_used = 0;

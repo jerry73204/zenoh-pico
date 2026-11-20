@@ -114,6 +114,7 @@ z_result_t _z_open_link(_z_link_t *zl, const _z_string_t *locator, const _z_conf
         if (ret == _Z_RES_OK) {
             // Open transport link for communication
             zl->_tx_broken = false;
+            zl->_rx_closed = false;
             zl->_open_deadline = open_deadline;
             z_result_t open_ret = zl->_open_f(zl);
             zl->_open_deadline = NULL;
@@ -185,6 +186,7 @@ z_result_t _z_listen_link(_z_link_t *zl, const _z_string_t *locator, const _z_co
         }
         if (ret == _Z_RES_OK) {
             zl->_tx_broken = false;
+            zl->_rx_closed = false;
             // Open transport link for listening
             if (zl->_listen_f(zl) != _Z_RES_OK) {
                 _Z_ERROR_LOG(_Z_ERR_TRANSPORT_OPEN_FAILED);
@@ -224,8 +226,20 @@ void _z_link_free(_z_link_t **l) {
     }
 }
 
+// nano-ros (issue 2774): record a read's end-of-stream on the link and give
+// the caller the 0 it always got for it.
+static size_t _z_link_note_eof(const _z_link_t *link, size_t rb) {
+    if (rb == _Z_LINK_READ_EOF) {
+        // The one mutable field this const view writes besides `_tx_broken`:
+        // the link outlives every caller, and the read task reads the flag.
+        ((_z_link_t *)link)->_rx_closed = true;
+        return 0;
+    }
+    return rb;
+}
+
 size_t _z_link_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, _z_slice_t *addr) {
-    size_t rb = link->_read_f(link, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf), addr);
+    size_t rb = _z_link_note_eof(link, link->_read_f(link, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf), addr));
     if (rb != SIZE_MAX) {
         _z_zbuf_set_wpos(zbf, _z_zbuf_get_wpos(zbf) + rb);
     }
@@ -234,7 +248,7 @@ size_t _z_link_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, _z_slice_t *addr
 
 size_t _z_link_recv_exact_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, size_t len, _z_slice_t *addr,
                                _z_sys_net_socket_t *socket) {
-    size_t rb = link->_read_exact_f(link, _z_zbuf_get_wptr(zbf), len, addr, socket);
+    size_t rb = _z_link_note_eof(link, link->_read_exact_f(link, _z_zbuf_get_wptr(zbf), len, addr, socket));
     if (rb != SIZE_MAX) {
         _z_zbuf_set_wpos(zbf, _z_zbuf_get_wpos(zbf) + rb);
     }
@@ -249,7 +263,7 @@ size_t _z_link_socket_recv_zbuf(const _z_link_t *link, _z_zbuf_t *zbf, const _z_
         _ZP_UNUSED(socket);
         return _z_link_recv_zbuf(link, zbf, NULL);
     }
-    size_t rb = link->_read_socket_f(socket, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf));
+    size_t rb = _z_link_note_eof(link, link->_read_socket_f(socket, _z_zbuf_get_wptr(zbf), _z_zbuf_space_left(zbf)));
     if (rb != SIZE_MAX) {
         _z_zbuf_set_wpos(zbf, _z_zbuf_get_wpos(zbf) + rb);
     }

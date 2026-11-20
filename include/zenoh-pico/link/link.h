@@ -207,7 +207,17 @@ typedef struct _z_link_t {
     // end mid-frame, so nothing more is written to it (`_z_link_send_wbuf`
     // refuses), and the unicast read task closes the session on seeing it.
     volatile bool _tx_broken;
+    // nano-ros (issue 2774): set when a read on a STREAM link reached
+    // end-of-stream -- the peer closed the connection, possibly without
+    // zenoh's CLOSE (a router killed, a host gone). A read returning 0 cannot
+    // say this on every link (FreeRTOS+TCP returns 0 on a timeout, a
+    // non-blocking custom link on "nothing yet"), so a link that KNOWS returns
+    // `_Z_LINK_READ_EOF`, the recv helpers in `link.c` record it here and hand
+    // their callers 0 as before, and the unicast read task closes the session
+    // on seeing it, which is what starts a reconnect.
+    volatile bool _rx_closed;
 } _z_link_t;
+
 
 void _z_link_clear(_z_link_t *zl);
 void _z_link_free(_z_link_t **zl);

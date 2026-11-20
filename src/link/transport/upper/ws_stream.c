@@ -31,12 +31,16 @@ z_result_t _z_ws_transport_listen(_z_ws_socket_t *sock) { return _z_tcp_listen(&
 
 void _z_ws_transport_close(_z_ws_socket_t *sock) { _z_tcp_close(&sock->_sock); }
 
+// nano-ros (issue 2774): the WebSocket layer frames its own reads and reads
+// 0 as it always did; only the link-level recv helpers act on end-of-stream.
+static size_t _z_ws_eof_as_zero(size_t rb) { return rb == _Z_LINK_READ_EOF ? 0 : rb; }
+
 size_t _z_ws_transport_read(const _z_ws_socket_t *sock, uint8_t *ptr, size_t len) {
-    return _z_tcp_read(sock->_sock, ptr, len);
+    return _z_ws_eof_as_zero(_z_tcp_read(sock->_sock, ptr, len));
 }
 
 size_t _z_ws_transport_read_exact(const _z_ws_socket_t *sock, uint8_t *ptr, size_t len) {
-    return _z_tcp_read_exact(sock->_sock, ptr, len);
+    return _z_ws_eof_as_zero(_z_tcp_read_exact(sock->_sock, ptr, len));
 }
 
 size_t _z_ws_transport_write(const _z_ws_socket_t *sock, const uint8_t *ptr, size_t len) {
@@ -44,7 +48,7 @@ size_t _z_ws_transport_write(const _z_ws_socket_t *sock, const uint8_t *ptr, siz
 }
 
 size_t _z_ws_transport_read_socket(const _z_sys_net_socket_t socket, uint8_t *ptr, size_t len) {
-    return _z_tcp_read(socket, ptr, len);
+    return _z_ws_eof_as_zero(_z_tcp_read(socket, ptr, len));
 }
 
 #endif

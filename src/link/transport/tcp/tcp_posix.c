@@ -277,6 +277,11 @@ static size_t _z_tcp_posix_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t l
         }
         return SIZE_MAX;
     }
+    // nano-ros (issue 2774): POSIX `recv` returns 0 for a non-empty buffer
+    // only at end-of-stream.
+    if ((rb == 0) && (len > 0)) {
+        return _Z_LINK_READ_EOF;
+    }
 
     return (size_t)rb;
 }
@@ -287,7 +292,7 @@ static size_t _z_tcp_posix_read_exact(_z_sys_net_socket_t sock, uint8_t *ptr, si
 
     do {
         size_t rb = _z_tcp_posix_read(sock, pos, len - n);
-        if ((rb == SIZE_MAX) || (rb == 0)) {
+        if ((rb == SIZE_MAX) || (rb == 0) || (rb == _Z_LINK_READ_EOF)) {
             n = rb;
             break;
         }
