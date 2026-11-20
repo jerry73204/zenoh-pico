@@ -257,6 +257,11 @@ static size_t _z_tcp_windows_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t
     if (rb == SOCKET_ERROR) {
         return SIZE_MAX;
     }
+    // nano-ros #2779: a BSD recv returns 0 for a non-empty buffer only at
+    // end-of-stream; report it so the link closes and the session reopens.
+    if ((rb == 0) && (len > 0)) {
+        return _Z_LINK_READ_EOF;
+    }
 
     return (size_t)rb;
 }
@@ -267,7 +272,7 @@ static size_t _z_tcp_windows_read_exact(_z_sys_net_socket_t sock, uint8_t *ptr, 
 
     do {
         size_t rb = _z_tcp_windows_read(sock, pos, len - n);
-        if ((rb == SIZE_MAX) || (rb == 0)) {
+        if ((rb == SIZE_MAX) || (rb == 0) || (rb == _Z_LINK_READ_EOF)) {
             n = rb;
             break;
         }
