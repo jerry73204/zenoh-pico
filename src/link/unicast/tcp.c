@@ -22,6 +22,13 @@
 
 #if Z_FEATURE_LINK_TCP == 1
 
+// nano-ros (issue 2950): how long a one-attempt open (connect budget 0) waits
+// for its TCP connect. A refused port answers at once; this bounds a peer
+// that drops the SYN.
+#ifndef Z_TCP_ONE_ATTEMPT_CONNECT_TIMEOUT_MS
+#define Z_TCP_ONE_ATTEMPT_CONNECT_TIMEOUT_MS 1000
+#endif
+
 z_result_t _z_endpoint_tcp_valid(_z_endpoint_t *endpoint) {
     _z_string_t tcp_str = _z_string_alias_str(TCP_SCHEMA);
     if (!_z_string_equals(&endpoint->_locator._protocol, &tcp_str)) {
@@ -46,7 +53,12 @@ z_result_t _z_f_link_open_tcp(_z_link_t *zl) {
     // nano-ros (issue 2437): the connect shares the open's budget with the
     // handshake (issue 2389), so a peer that drops the SYN ends the attempt at
     // the budget, not at the stack's own SYN-retry limit (about 127 s on Linux).
-    int32_t connect_timeout_ms = -1;
+    // nano-ros (issue 2950): no open deadline is a ONE-attempt open (the
+    // session gives every other mode one). Its connect is bounded too, by
+    // `Z_TCP_ONE_ATTEMPT_CONNECT_TIMEOUT_MS`, so an unreachable peer fails at
+    // once instead of after the stack's SYN-retry limit. Its handshake keeps
+    // the full per-attempt bound.
+    int32_t connect_timeout_ms = Z_TCP_ONE_ATTEMPT_CONNECT_TIMEOUT_MS;
     if (zl->_open_deadline != NULL) {
         z_clock_t now = z_clock_now();
         unsigned long remaining = zp_clock_elapsed_ms_since((z_clock_t *)zl->_open_deadline, &now);

@@ -220,6 +220,14 @@ static z_result_t _z_open_connect_locator(_z_session_rc_t *zn, _z_pending_peers_
         z_clock_advance_ms(&budget_deadline, (unsigned long)timeout_ms);
         open_deadline = &budget_deadline;
     }
+    // nano-ros (issue 2950): with no budget deadline, a TCP connect to a peer
+    // that drops the SYN waited the stack's own SYN-retry limit (about 127 s on
+    // Linux) inside ONE attempt. Forever (-1) now gives each attempt a deadline
+    // of `Z_TRANSPORT_CONNECT_TIMEOUT`, the bound its handshake already had, so
+    // a slow link still connects and the loop still retries. One attempt (0)
+    // keeps no deadline here: `tcp.c` bounds its connect alone, so its
+    // handshake keeps the full per-attempt bound.
+    z_clock_t attempt_deadline = now;
 
     while (!out->transport_opened) {
         _Z_DEBUG("Attempting to open %zu connect locator(s)", connect_len);
@@ -232,6 +240,11 @@ static z_result_t _z_open_connect_locator(_z_session_rc_t *zn, _z_pending_peers_
 
             _z_string_t *locator = &peer->_locator;
 
+            if (timeout_ms < 0) {
+                attempt_deadline = z_clock_now();
+                z_clock_advance_ms(&attempt_deadline, (unsigned long)Z_TRANSPORT_CONNECT_TIMEOUT);
+                open_deadline = &attempt_deadline;
+            }
             ret = _z_open_inner(zn, locator, zid, _Z_PEER_OP_OPEN, config, open_deadline);
             if (ret == _Z_RES_OK) {
                 out->transport_opened = true;
