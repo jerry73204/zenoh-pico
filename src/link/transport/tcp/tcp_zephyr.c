@@ -16,6 +16,7 @@
 
 #if defined(ZP_PLATFORM_SOCKET_ZEPHYR) && (Z_FEATURE_LINK_TCP == 1 || Z_FEATURE_LINK_TLS == 1 || Z_FEATURE_LINK_WS == 1)
 
+#include <errno.h>
 #include <netdb.h>
 #include <stddef.h>
 #include <string.h>
@@ -167,7 +168,11 @@ static z_result_t _z_tcp_zephyr_accept(const _z_sys_net_socket_t *sock_in, _z_sy
     struct sockaddr naddr;
     socklen_t nlen = sizeof(naddr);
     sock_out->_fd = -1;
-    int con_socket = accept(sock_in->_fd, &naddr, &nlen);
+    // nano-ros (B46): a signal is not a failed accept.
+    int con_socket;
+    do {
+        con_socket = accept(sock_in->_fd, &naddr, &nlen);
+    } while ((con_socket < 0) && (errno == EINTR));
     if (con_socket < 0) {
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
     }
@@ -201,6 +206,11 @@ static void _z_tcp_zephyr_close(_z_sys_net_socket_t *sock) {
 }
 
 static size_t _z_tcp_zephyr_read(_z_sys_net_socket_t sock, uint8_t *ptr, size_t len) {
+    // nano-ros (B46): EINTR is NOT retried here. The socket has SO_RCVTIMEO,
+    // and on the FreeRTOS POSIX port a SIGALRM tick interrupts a blocked
+    // recv every tick: retrying would restart the timeout each time, so a
+    // read waiting for data that never comes would never time out. EINTR
+    // returns SIZE_MAX, the same "no data yet" as the timeout itself.
     ssize_t rb = recv(sock._fd, ptr, len, 0);
     if (rb < (ssize_t)0) {
         return SIZE_MAX;
